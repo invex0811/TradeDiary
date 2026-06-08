@@ -613,6 +613,7 @@ function App() {
   }, [user]);
 
   const stats = useMemo(() => calculateStats(trades), [trades]);
+  const closedTradesCount = useMemo(() => trades.filter((trade) => trade.status === "Closed").length, [trades]);
 
   const futuresTrades = useMemo(() => trades.filter((trade) => trade.market === "futures"), [trades]);
 
@@ -729,7 +730,20 @@ function App() {
       <main className="dashboard">
         <header className="topbar">
           <button className="icon-button mobile-only" onClick={() => setSidebarOpen(true)}><Menu size={20} /></button>
-          <div className="search"><Search size={17} /><input placeholder="Поиск по сделкам..." /></div>
+          <div className="topbar-summary" aria-label="Краткая сводка">
+            <div className="topbar-summary-item compact">
+              <span>Всего</span>
+              <strong>{trades.length}</strong>
+            </div>
+            <div className="topbar-summary-item compact">
+              <span>Закрыто</span>
+              <strong>{closedTradesCount}</strong>
+            </div>
+            <div className="topbar-summary-item compact">
+              <span>PnL</span>
+              <strong className={stats.net >= 0 ? "positive" : "negative"}>{formatSignedMoney(stats.net)}</strong>
+            </div>
+          </div>
         </header>
 
         <section className="content">
