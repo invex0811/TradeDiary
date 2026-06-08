@@ -54,6 +54,7 @@ type Trade = {
   status: "Closed" | "Open";
   note?: string;
   screenshotDataUrl?: string;
+  screenshotUrl?: string;
 };
 
 type DashboardResponse = {
@@ -86,6 +87,7 @@ type RawTradeInput = {
   roi?: unknown;
   note?: unknown;
   screenshotDataUrl?: unknown;
+  screenshotUrl?: unknown;
 };
 
 type SortKey = "pair" | "side" | "opened" | "entry" | "exit" | "size" | "pnl" | "roi";
@@ -221,6 +223,25 @@ const loadBingXCredentials = (uid: string) => {
     return { apiKey: "", secretKey: "" };
   }
 };
+const normalizeTradingViewUrl = (value: string) => {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  try {
+    const url = new URL(trimmed);
+    if (url.hostname !== "www.tradingview.com" && url.hostname !== "tradingview.com") return "";
+    const match = url.pathname.match(/^\/x\/([A-Za-z0-9]+)\/?$/);
+    return match ? `https://www.tradingview.com/x/${match[1]}/` : "";
+  } catch {
+    return "";
+  }
+};
+const tradingViewPreviewUrl = (value: string) => {
+  const normalized = normalizeTradingViewUrl(value);
+  const match = normalized.match(/\/x\/([A-Za-z0-9]+)\//);
+  if (!match) return "";
+  const id = match[1];
+  return `https://s3.tradingview.com/snapshots/${id[0].toLowerCase()}/${id}.png`;
+};
 const normalizeTrade = (trade: RawTradeInput): Trade => {
   const openedAt = Number(trade.openedAt ?? Date.parse(String(trade.opened || Date.now())));
   const closedAt = Number(
@@ -246,6 +267,7 @@ const normalizeTrade = (trade: RawTradeInput): Trade => {
     status: trade.status === "Open" ? "Open" : "Closed",
     note: typeof trade.note === "string" ? trade.note : "",
     screenshotDataUrl: typeof trade.screenshotDataUrl === "string" ? trade.screenshotDataUrl : "",
+    screenshotUrl: typeof trade.screenshotUrl === "string" ? trade.screenshotUrl : "",
   };
 };
 const tradeFromFirestore = (data: DocumentData): Trade => normalizeTrade(data as CachedTrade);
@@ -426,6 +448,7 @@ function App() {
           ...trade,
           note: typeof manualFields?.note === "string" ? manualFields.note : trade.note,
           screenshotDataUrl: typeof manualFields?.screenshotDataUrl === "string" ? manualFields.screenshotDataUrl : trade.screenshotDataUrl,
+          screenshotUrl: typeof manualFields?.screenshotUrl === "string" ? manualFields.screenshotUrl : trade.screenshotUrl,
           source: "bingx",
           syncedAt: serverTimestamp(),
         } satisfies CachedTrade, { merge: true });
@@ -1242,15 +1265,25 @@ function TradePairCell({ trade }: { trade: Trade }) {
 function TradeDetailModal({ userId, trade, onClose }: { userId: string; trade: Trade; onClose: () => void }) {
   const [note, setNote] = useState(trade.note || "");
   const [screenshotDataUrl, setScreenshotDataUrl] = useState(trade.screenshotDataUrl || "");
+  const [screenshotUrl, setScreenshotUrl] = useState(trade.screenshotUrl || "");
   const [saveMessage, setSaveMessage] = useState("");
   const volume = Math.abs(trade.size * trade.entry);
+  const normalizedScreenshotUrl = normalizeTradingViewUrl(screenshotUrl);
+  const previewUrl = screenshotDataUrl || tradingViewPreviewUrl(screenshotUrl);
 
   const saveTradeJournal = async () => {
+    const cleanScreenshotUrl = normalizeTradingViewUrl(screenshotUrl);
+    if (screenshotUrl.trim() && !cleanScreenshotUrl) {
+      setSaveMessage("Вставь ссылку TradingView формата https://www.tradingview.com/x/...");
+      return;
+    }
     await setDoc(doc(db, "users", userId, "trades", trade.id), {
       note: note.trim(),
       screenshotDataUrl,
+      screenshotUrl: cleanScreenshotUrl,
       journalUpdatedAt: serverTimestamp(),
     }, { merge: true });
+    setScreenshotUrl(cleanScreenshotUrl);
     setSaveMessage("Сохранено");
   };
 
@@ -1300,21 +1333,27 @@ function TradeDetailModal({ userId, trade, onClose }: { userId: string; trade: T
               <span>Описание сделки</span>
               <textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="План, причина входа, ошибка, эмоции, вывод..." />
             </label>
+            <label>
+              <span>TradingView ссылка</span>
+              <input value={screenshotUrl} onChange={(event) => setScreenshotUrl(event.target.value)} placeholder="https://www.tradingview.com/x/WizqhF6V/" />
+            </label>
             <div className="screenshot-uploader">
               <div>
                 <span>Скрин TradingView</span>
-                <p>PNG/JPG/WebP до 700 KB</p>
+                <p>Загрузи файл до 700 KB или вставь ссылку выше</p>
               </div>
               <label className="upload-button">
                 Загрузить скрин
                 <input accept="image/*" type="file" onChange={(event) => uploadScreenshot(event.target.files?.[0])} />
               </label>
             </div>
-            {screenshotDataUrl && (
+            {previewUrl && (
               <div className="trade-screenshot">
-                <img src={screenshotDataUrl} alt="TradingView screenshot" />
+                <img src={previewUrl} alt="TradingView screenshot" />
+                {normalizedScreenshotUrl && <a href={normalizedScreenshotUrl} target="_blank" rel="noreferrer">Открыть в TradingView</a>}
                 <button onClick={() => {
                   setScreenshotDataUrl("");
+                  setScreenshotUrl("");
                   setSaveMessage("Скрин удалён, нажми сохранить");
                 }}>Удалить скрин</button>
               </div>
