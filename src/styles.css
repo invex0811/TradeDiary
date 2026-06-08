@@ -2,6 +2,12 @@
 
 :root { font-family: Inter, system-ui, sans-serif; color: #f6f7fb; background: #090b12; font-synthesis: none; }
 * { box-sizing: border-box; }
+* { scrollbar-width: thin; scrollbar-color: #3f465a #0d1018; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: #0d1018; border-radius: 999px; }
+*::-webkit-scrollbar-thumb { border: 2px solid #0d1018; border-radius: 999px; background: linear-gradient(180deg, #586176, #363d4f); }
+*::-webkit-scrollbar-thumb:hover { background: linear-gradient(180deg, #8b5cf6, #6d45d5); }
+*::-webkit-scrollbar-corner { background: #0d1018; }
 body { margin: 0; min-width: 320px; min-height: 100vh; }
 button, input { font: inherit; }
 button { cursor: pointer; }
@@ -180,6 +186,11 @@ a { color: inherit; text-decoration: none; }
 .settings-form p { margin: 0; color: #727b8e; font-size: 11px; line-height: 1.6; }
 .settings-actions { display: grid; grid-template-columns: 1fr auto; gap: 9px; }
 .trade-detail-body { padding: 18px; display: grid; gap: 15px; overflow-y: auto; max-height: calc(min(720px, 100vh - 56px) - 72px); }
+.trade-detail-body { scrollbar-color: #596176 #10141e; }
+.trade-detail-body::-webkit-scrollbar { width: 12px; }
+.trade-detail-body::-webkit-scrollbar-track { margin: 8px 0; background: #10141e; border-left: 1px solid #1d2331; border-radius: 999px; }
+.trade-detail-body::-webkit-scrollbar-thumb { border: 3px solid #10141e; border-radius: 999px; background: linear-gradient(180deg, #626b80, #3a4254); }
+.trade-detail-body::-webkit-scrollbar-thumb:hover { background: linear-gradient(180deg, #9b72ff, #6d45d5); }
 .trade-detail-hero { min-height: 120px; padding: 18px; display: grid; align-content: center; gap: 10px; border: 1px solid #202431; border-radius: 12px; background: #11151e; }
 .trade-detail-hero strong { font-size: 30px; letter-spacing: -.04em; }
 .trade-detail-hero p { margin: 0; font-size: 12px; font-weight: 700; }
