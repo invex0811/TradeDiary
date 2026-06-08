@@ -436,7 +436,7 @@ function App() {
     setSyncState("loading");
     try {
       const token = await user.getIdToken();
-      const response = await fetch(`${apiBaseUrl}/api/dashboard?days=90`, {
+      const response = await fetch(`${apiBaseUrl}/api/dashboard?days=30`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`,
