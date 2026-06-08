@@ -32,7 +32,7 @@ import {
   X,
 } from "lucide-react";
 import { onAuthStateChanged, signInWithPopup, signOut, type User } from "firebase/auth";
-import { collection, doc, getDocs, onSnapshot, serverTimestamp, writeBatch, type DocumentData } from "firebase/firestore";
+import { collection, doc, getDocs, onSnapshot, serverTimestamp, setDoc, writeBatch, type DocumentData } from "firebase/firestore";
 import { Navigate, NavLink, Route, Routes, useLocation } from "react-router-dom";
 import { auth, db, googleProvider } from "./firebase";
 
@@ -52,6 +52,8 @@ type Trade = {
   pnl: number;
   roi: number;
   status: "Closed" | "Open";
+  note?: string;
+  screenshotDataUrl?: string;
 };
 
 type DashboardResponse = {
@@ -82,6 +84,8 @@ type RawTradeInput = {
   size?: unknown;
   pnl?: unknown;
   roi?: unknown;
+  note?: unknown;
+  screenshotDataUrl?: unknown;
 };
 
 type SortKey = "pair" | "side" | "opened" | "entry" | "exit" | "size" | "pnl" | "roi";
@@ -240,6 +244,8 @@ const normalizeTrade = (trade: RawTradeInput): Trade => {
     pnl: Number(trade.pnl || 0),
     roi: Number(trade.roi || 0),
     status: trade.status === "Open" ? "Open" : "Closed",
+    note: typeof trade.note === "string" ? trade.note : "",
+    screenshotDataUrl: typeof trade.screenshotDataUrl === "string" ? trade.screenshotDataUrl : "",
   };
 };
 const tradeFromFirestore = (data: DocumentData): Trade => normalizeTrade(data as CachedTrade);
@@ -411,11 +417,15 @@ function App() {
       const batch = writeBatch(db);
       const tradesRef = collection(db, "users", user.uid, "trades");
       const existingTrades = await getDocs(tradesRef);
+      const existingTradeData = new Map(existingTrades.docs.map((document) => [document.id, document.data() as Partial<CachedTrade>]));
       existingTrades.forEach((document) => batch.delete(document.ref));
       normalizedTrades.forEach((trade) => {
         const ref = doc(db, "users", user.uid, "trades", trade.id);
+        const manualFields = existingTradeData.get(trade.id);
         batch.set(ref, {
           ...trade,
+          note: typeof manualFields?.note === "string" ? manualFields.note : trade.note,
+          screenshotDataUrl: typeof manualFields?.screenshotDataUrl === "string" ? manualFields.screenshotDataUrl : trade.screenshotDataUrl,
           source: "bingx",
           syncedAt: serverTimestamp(),
         } satisfies CachedTrade, { merge: true });
@@ -616,6 +626,7 @@ function App() {
                 path="/"
                 element={
                   <OverviewPage
+                    userId={user.uid}
                     balance={balance}
                     stats={stats}
                     trades={trades}
@@ -627,7 +638,7 @@ function App() {
               <Route
                 path="/trades"
                 element={
-                  <TradesPage trades={futuresTrades} />
+                  <TradesPage userId={user.uid} trades={futuresTrades} />
                 }
               />
               <Route
@@ -702,12 +713,23 @@ function LoadingState() {
   );
 }
 
-function OverviewPage({ balance, stats, trades, futuresTrades, equityData }: { balance: number; stats: { net: number; winRate: number; wins: number; profitFactor: number; profit: number; losses: number }; trades: Trade[]; futuresTrades: Trade[]; equityData: Array<{ date: string; equity: number; pnl: number }> }) {
+function OverviewPage({ userId, balance, stats, trades, futuresTrades, equityData }: { userId: string; balance: number; stats: { net: number; winRate: number; wins: number; profitFactor: number; profit: number; losses: number }; trades: Trade[]; futuresTrades: Trade[]; equityData: Array<{ date: string; equity: number; pnl: number }> }) {
+  const openTrades = futuresTrades.filter((trade) => trade.status === "Open");
   return (
     <>
       <StatsGrid balance={balance} stats={stats} tradesCount={trades.length} />
       <OverviewCharts equityData={equityData} stats={stats} />
+      {openTrades.length > 0 && (
+        <TradeTable
+          userId={userId}
+          title="Открытые сделки"
+          subtitle="Позиции, которые BingX отдаёт прямо сейчас через positions"
+          trades={openTrades}
+          emptyMessage="Открытых сделок сейчас нет."
+        />
+      )}
       <TradeTable
+        userId={userId}
         title="Futures сделки"
         subtitle="Perpetual Swap: позиции, fill history и order history"
         trades={futuresTrades}
@@ -717,15 +739,27 @@ function OverviewPage({ balance, stats, trades, futuresTrades, equityData }: { b
   );
 }
 
-function TradesPage({ trades }: { trades: Trade[] }) {
+function TradesPage({ userId, trades }: { userId: string; trades: Trade[] }) {
+  const openTrades = trades.filter((trade) => trade.status === "Open");
+  const historyTrades = trades.filter((trade) => trade.status === "Closed");
   return (
-    <TradeTable
-      title="Futures сделки"
-      subtitle="Perpetual Swap: позиции, fill history и order history"
-      trades={trades}
-      emptyMessage="Сделок пока нет. Синхронизируй BingX или проверь, отдаёт ли API историю Perpetual Swap."
-      filterable
-    />
+    <>
+      <TradeTable
+        userId={userId}
+        title="Открытые сделки"
+        subtitle="Текущие позиции BingX. После закрытия они попадут в историю."
+        trades={openTrades}
+        emptyMessage="Открытых сделок сейчас нет."
+      />
+      <TradeTable
+        userId={userId}
+        title="История futures-сделок"
+        subtitle="Закрытые Perpetual Swap сделки из fill history и order history"
+        trades={historyTrades}
+        emptyMessage="Закрытых сделок пока нет. Синхронизируй BingX или проверь, отдаёт ли API историю Perpetual Swap."
+        filterable
+      />
+    </>
   );
 }
 
@@ -1070,7 +1104,7 @@ function CalendarPage({ trades }: { trades: Trade[] }) {
   );
 }
 
-function TradeTable({ title, subtitle, trades, emptyMessage, filterable = false }: { title: string; subtitle: string; trades: Trade[]; emptyMessage: string; filterable?: boolean }) {
+function TradeTable({ userId, title, subtitle, trades, emptyMessage, filterable = false }: { userId: string; title: string; subtitle: string; trades: Trade[]; emptyMessage: string; filterable?: boolean }) {
   const [sortKey, setSortKey] = useState<SortKey>("opened");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const [searchQuery, setSearchQuery] = useState("");
@@ -1176,7 +1210,7 @@ function TradeTable({ title, subtitle, trades, emptyMessage, filterable = false 
         </table>
       </div>
       {selectedTrade && (
-        <TradeDetailModal trade={selectedTrade} onClose={() => setSelectedTrade(null)} />
+        <TradeDetailModal userId={userId} trade={selectedTrade} onClose={() => setSelectedTrade(null)} />
       )}
     </section>
   );
@@ -1205,8 +1239,39 @@ function TradePairCell({ trade }: { trade: Trade }) {
   );
 }
 
-function TradeDetailModal({ trade, onClose }: { trade: Trade; onClose: () => void }) {
+function TradeDetailModal({ userId, trade, onClose }: { userId: string; trade: Trade; onClose: () => void }) {
+  const [note, setNote] = useState(trade.note || "");
+  const [screenshotDataUrl, setScreenshotDataUrl] = useState(trade.screenshotDataUrl || "");
+  const [saveMessage, setSaveMessage] = useState("");
   const volume = Math.abs(trade.size * trade.entry);
+
+  const saveTradeJournal = async () => {
+    await setDoc(doc(db, "users", userId, "trades", trade.id), {
+      note: note.trim(),
+      screenshotDataUrl,
+      journalUpdatedAt: serverTimestamp(),
+    }, { merge: true });
+    setSaveMessage("Сохранено");
+  };
+
+  const uploadScreenshot = (file?: File) => {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setSaveMessage("Нужен файл изображения");
+      return;
+    }
+    if (file.size > 700 * 1024) {
+      setSaveMessage("Скрин слишком большой. Сожми до 700 KB.");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      setScreenshotDataUrl(String(reader.result || ""));
+      setSaveMessage("Скрин добавлен, нажми сохранить");
+    };
+    reader.readAsDataURL(file);
+  };
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <section className="trade-detail-modal" onClick={(event) => event.stopPropagation()}>
@@ -1229,6 +1294,35 @@ function TradeDetailModal({ trade, onClose }: { trade: Trade; onClose: () => voi
             <DetailItem label="Цена выхода" value={formatNumber(trade.exit)} />
             <DetailItem label="Размер позиции" value={formatNumber(trade.size)} />
             <DetailItem label="Объём" value={formatMoney(volume)} />
+          </div>
+          <div className="trade-journal">
+            <label>
+              <span>Описание сделки</span>
+              <textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="План, причина входа, ошибка, эмоции, вывод..." />
+            </label>
+            <div className="screenshot-uploader">
+              <div>
+                <span>Скрин TradingView</span>
+                <p>PNG/JPG/WebP до 700 KB</p>
+              </div>
+              <label className="upload-button">
+                Загрузить скрин
+                <input accept="image/*" type="file" onChange={(event) => uploadScreenshot(event.target.files?.[0])} />
+              </label>
+            </div>
+            {screenshotDataUrl && (
+              <div className="trade-screenshot">
+                <img src={screenshotDataUrl} alt="TradingView screenshot" />
+                <button onClick={() => {
+                  setScreenshotDataUrl("");
+                  setSaveMessage("Скрин удалён, нажми сохранить");
+                }}>Удалить скрин</button>
+              </div>
+            )}
+            <div className="journal-actions">
+              <button className="profile-menu-action" onClick={() => void saveTradeJournal()}>Сохранить описание</button>
+              {saveMessage && <span>{saveMessage}</span>}
+            </div>
           </div>
         </div>
       </section>
