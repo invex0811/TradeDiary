@@ -244,6 +244,16 @@ const tradingViewPreviewUrl = (value: string) => {
   const id = match[1];
   return `https://s3.tradingview.com/snapshots/${id[0].toLowerCase()}/${id}.png`;
 };
+const extractBingXCooldownUntil = (messages: string[]) => {
+  const timestamps = messages
+    .map((message) => message.match(/unblocked after (\d{13})/)?.[1])
+    .filter((value): value is string => Boolean(value))
+    .map(Number)
+    .filter((value) => Number.isFinite(value) && value > Date.now());
+  return timestamps.length ? Math.max(...timestamps) : null;
+};
+const formatCooldown = (timestamp: number) =>
+  new Intl.DateTimeFormat("ru-RU", { timeStyle: "short" }).format(new Date(timestamp));
 const normalizeTrade = (trade: RawTradeInput): Trade => {
   const openedAt = Number(trade.openedAt ?? Date.parse(String(trade.opened || Date.now())));
   const closedAt = Number(
@@ -370,6 +380,7 @@ function App() {
   const [balance, setBalance] = useState(0);
   const [syncMessage, setSyncMessage] = useState("Загружаю данные");
   const [syncWarnings, setSyncWarnings] = useState<string[]>([]);
+  const [syncCooldownUntil, setSyncCooldownUntil] = useState<number | null>(null);
   const [lastSyncAt, setLastSyncAt] = useState<number | null>(null);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const [bingxModalOpen, setBingxModalOpen] = useState(false);
@@ -377,6 +388,7 @@ function App() {
   const [bingxSecretKey, setBingxSecretKey] = useState("");
   const profileMenuRef = useRef<HTMLDivElement | null>(null);
   const hasBingXCredentials = Boolean(bingxApiKey.trim() && bingxSecretKey.trim());
+  const syncBlockedByCooldown = Boolean(syncCooldownUntil && syncCooldownUntil > Date.now());
 
   useEffect(() => onAuthStateChanged(auth, (nextUser) => {
     setUser(nextUser);
@@ -412,6 +424,10 @@ function App() {
 
   const syncBingX = async () => {
     if (!user) return;
+    if (syncBlockedByCooldown && syncCooldownUntil) {
+      setSyncMessage(`BingX history API разблокируется в ${formatCooldown(syncCooldownUntil)}`);
+      return;
+    }
     if (!hasBingXCredentials) {
       setBingxModalOpen(true);
       setSyncMessage("Подключи BingX API ключи для синхронизации");
@@ -420,7 +436,7 @@ function App() {
     setSyncState("loading");
     try {
       const token = await user.getIdToken();
-      const response = await fetch(`${apiBaseUrl}/api/dashboard?days=730`, {
+      const response = await fetch(`${apiBaseUrl}/api/dashboard?days=90`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`,
@@ -470,6 +486,7 @@ function App() {
       await batch.commit();
       setLastSyncAt(Date.now());
       setSyncWarnings(data.syncWarnings || []);
+      setSyncCooldownUntil(extractBingXCooldownUntil(data.syncWarnings || []));
       setSyncMessage(normalizedTrades.length ? `Обновлено из BingX: ${normalizedTrades.length}` : "BingX подключён, новых сделок API не отдал");
       setSyncState(normalizedTrades.length ? "bingx" : "empty");
     } catch (error) {
@@ -622,8 +639,8 @@ function App() {
                 <button className="profile-menu-action" onClick={() => setBingxModalOpen(true)}>
                   <KeyRound size={16} /> {hasBingXCredentials ? "Обновить BingX ключи" : "Подключить BingX"}
                 </button>
-                <button className="profile-menu-action" onClick={() => void syncBingX()} disabled={syncState === "loading"}>
-                  <Activity size={16} /> {syncState === "loading" ? "Синхронизирую..." : "Синхронизировать BingX"}
+                <button className="profile-menu-action" onClick={() => void syncBingX()} disabled={syncState === "loading" || syncBlockedByCooldown}>
+                  <Activity size={16} /> {syncState === "loading" ? "Синхронизирую..." : syncBlockedByCooldown && syncCooldownUntil ? `Пауза до ${formatCooldown(syncCooldownUntil)}` : "Синхронизировать BingX"}
                 </button>
                 <button className="profile-menu-action danger" onClick={() => signOut(auth)}>
                   <LogOut size={16} /> Выйти из аккаунта
@@ -646,6 +663,7 @@ function App() {
           </div>
 
           {syncState === "loading" && dataReady && <div className="loading-banner"><span className="loading-spinner" /> Обновляю сделки из BingX...</div>}
+          {syncBlockedByCooldown && syncCooldownUntil && <div className="alert-panel warning">BingX временно заблокировал историю из-за частых запросов. Следующая попытка после {formatCooldown(syncCooldownUntil)}.</div>}
           {syncState === "error" && <div className="alert-panel">BingX не подключился: {syncMessage}. Проверь `.env`, права ключа и IP whitelist.</div>}
           {syncWarnings.map((warning) => <div className="alert-panel warning" key={warning}>{warning}</div>)}
 

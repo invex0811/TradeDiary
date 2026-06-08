@@ -284,13 +284,13 @@ app.all("/api/dashboard", async (req, res) => {
     const credentials = resolveBingXCredentials(req.method === "POST" ? req.body : {});
 
     const now = Date.now();
-    const historyDays = Math.max(7, Math.min(Number(req.query.days || 365), 730));
+    const historyDays = Math.max(7, Math.min(Number(req.query.days || 90), 90));
     const historyStart = now - historyDays * 24 * 60 * 60 * 1000;
     const [balance, positions, fillsResult, ordersResult] = await Promise.allSettled([
       bingxRequest<unknown>(credentials, "/openApi/swap/v2/user/balance"),
       bingxRequest<unknown>(credentials, "/openApi/swap/v2/user/positions"),
-      collectBingXHistory(credentials, "/openApi/swap/v2/trade/allFillOrders", historyStart, now, 7),
-      collectBingXHistory(credentials, "/openApi/swap/v2/trade/allOrders", historyStart, now, 7),
+      collectBingXHistory(credentials, "/openApi/swap/v2/trade/allFillOrders", historyStart, now, 30),
+      collectBingXHistory(credentials, "/openApi/swap/v2/trade/allOrders", historyStart, now, 30),
     ]);
 
     if (balance.status === "rejected") throw balance.reason;
