@@ -6,6 +6,8 @@ import express from "express";
 const app = express();
 const port = Number(process.env.PORT || 8787);
 const bingxBaseUrl = "https://open-api.bingx.com";
+const dayMs = 24 * 60 * 60 * 1000;
+const bingxHistoryWindowMs = 7 * dayMs - 60_000;
 
 app.use(cors());
 app.use(express.json());
@@ -16,6 +18,7 @@ type BingXCredentials = {
   apiKey: string;
   secretKey: string;
 };
+type BingXHistoryEndpoint = "fills" | "orders";
 
 type NormalizedTrade = {
   id: string;
@@ -96,23 +99,32 @@ async function bingxRequest<T>(credentials: BingXCredentials, path: string, para
 
 async function collectBingXHistory(
   credentials: BingXCredentials,
-  path: string,
+  endpoint: BingXHistoryEndpoint,
   startTime: number,
   endTime: number,
-  chunkDays: number,
   extraParams: Record<string, string> = {},
 ) {
   const chunks: unknown[] = [];
-  const chunkMs = chunkDays * 24 * 60 * 60 * 1000;
 
-  for (let cursor = startTime; cursor < endTime; cursor += chunkMs) {
-    const chunkEnd = Math.min(cursor + chunkMs - 1, endTime);
-    chunks.push(await bingxRequest<unknown>(credentials, path, {
-      ...extraParams,
-      startTime: String(cursor),
-      endTime: String(chunkEnd),
-      limit: extraParams.limit || "500",
-    }));
+  for (let cursor = startTime; cursor < endTime; cursor += bingxHistoryWindowMs) {
+    const chunkEnd = Math.min(cursor + bingxHistoryWindowMs, endTime);
+    if (endpoint === "fills") {
+      chunks.push(await bingxRequest<unknown>(credentials, "/openApi/swap/v2/trade/allFillOrders", {
+        tradingUnit: "CONT",
+        currency: "USDT",
+        ...extraParams,
+        startTs: String(cursor),
+        endTs: String(chunkEnd),
+      }));
+    } else {
+      chunks.push(await bingxRequest<unknown>(credentials, "/openApi/swap/v2/trade/allOrders", {
+        currency: "USDT",
+        limit: extraParams.limit || "500",
+        ...extraParams,
+        startTime: String(cursor),
+        endTime: String(chunkEnd),
+      }));
+    }
   }
 
   return chunks;
@@ -272,6 +284,11 @@ function mergeDurationFromOrders(fillTrades: NormalizedTrade[], orderTrades: Nor
 const errorMessage = (value: unknown) =>
   value instanceof Error ? value.message : String(value || "Unknown error");
 
+const timestampParam = (value: unknown) => {
+  const timestamp = Number(value);
+  return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : null;
+};
+
 app.all("/api/dashboard", async (req, res) => {
   try {
     if (req.method !== "GET" && req.method !== "POST") {
@@ -284,13 +301,17 @@ app.all("/api/dashboard", async (req, res) => {
     const credentials = resolveBingXCredentials(req.method === "POST" ? req.body : {});
 
     const now = Date.now();
-    const historyDays = Math.max(7, Math.min(Number(req.query.days || 30), 30));
-    const historyStart = now - historyDays * 24 * 60 * 60 * 1000;
+    const requestedEnd = timestampParam(req.query.end) ?? now;
+    const requestedStart = timestampParam(req.query.start);
+    const historyDays = Math.max(1, Math.min(Number(req.query.days || 7), 7));
+    const historyEnd = Math.min(requestedEnd, now);
+    const rawHistoryStart = requestedStart ?? historyEnd - historyDays * dayMs;
+    const historyStart = Math.max(rawHistoryStart, historyEnd - bingxHistoryWindowMs);
     const [balance, positions, fillsResult, ordersResult] = await Promise.allSettled([
       bingxRequest<unknown>(credentials, "/openApi/swap/v2/user/balance"),
       bingxRequest<unknown>(credentials, "/openApi/swap/v2/user/positions"),
-      collectBingXHistory(credentials, "/openApi/swap/v2/trade/allFillOrders", historyStart, now, 7),
-      collectBingXHistory(credentials, "/openApi/swap/v2/trade/allOrders", historyStart, now, 7),
+      collectBingXHistory(credentials, "fills", historyStart, historyEnd),
+      collectBingXHistory(credentials, "orders", historyStart, historyEnd),
     ]);
 
     if (balance.status === "rejected") throw balance.reason;
@@ -302,7 +323,7 @@ app.all("/api/dashboard", async (req, res) => {
 
     const fillTrades = fillsResult.status === "fulfilled"
       ? fillsResult.value.flatMap((chunk) =>
-        extractList(chunk, ["fill_orders", "fills", "orders", "list"]).map(normalizeFill))
+        extractList(chunk, ["fillOrders", "fill_orders", "fills", "orders", "list"]).map(normalizeFill))
       : [];
     const orderTrades = ordersResult.status === "fulfilled"
       ? ordersResult.value.flatMap((chunk) =>
@@ -332,6 +353,10 @@ app.all("/api/dashboard", async (req, res) => {
         ordersResult.status === "rejected" ? `allOrders недоступен: ${errorMessage(ordersResult.reason)}.` : "",
         ordersResult.status === "rejected" && fillsResult.status === "rejected" ? "История сделок сейчас недоступна через BingX API. Открытые позиции всё равно обновляются через positions." : "",
       ].filter(Boolean),
+      historyWindow: {
+        start: historyStart,
+        end: historyEnd,
+      },
     });
   } catch (error) {
     res.status(502).json({
