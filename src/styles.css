@@ -164,12 +164,29 @@ a { color: inherit; text-decoration: none; }
 .calendar-cell.selected-day { border-color: #8b5cf6; box-shadow: 0 0 0 1px rgba(139,92,246,.35), 0 10px 28px rgba(139,92,246,.12); }
 .modal-backdrop { position: fixed; inset: 0; z-index: 50; padding: 28px; display: grid; place-items: center; background: rgba(4,6,12,.72); backdrop-filter: blur(10px); }
 .day-modal { width: min(980px, 100%); max-height: min(720px, calc(100vh - 56px)); overflow: hidden; border: 1px solid #272d3d; border-radius: 16px; background: #0f121a; box-shadow: 0 30px 120px rgba(0,0,0,.55); }
+.settings-modal, .trade-detail-modal { width: min(560px, 100%); max-height: min(720px, calc(100vh - 56px)); overflow: hidden; border: 1px solid #272d3d; border-radius: 16px; background: #0f121a; box-shadow: 0 30px 120px rgba(0,0,0,.55); }
+.trade-detail-modal { width: min(720px, 100%); }
 .modal-head { position: sticky; top: 0; z-index: 1; padding: 18px; display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; border-bottom: 1px solid #202431; background: rgba(15,18,26,.96); backdrop-filter: blur(12px); }
 .modal-head .panel-title { margin-bottom: 0; }
 .modal-close { width: 34px; height: 34px; display: grid; place-items: center; flex: 0 0 auto; color: #aeb6c8; border: 1px solid #242a39; border-radius: 10px; background: #11151e; font-size: 24px; line-height: 1; }
 .modal-close:hover { color: #ffffff; border-color: #ef476f; background: rgba(239,71,111,.12); }
 .day-modal .table-scroll { max-height: calc(min(720px, 100vh - 56px) - 82px); overflow: auto; }
 .day-modal table { min-width: 820px; }
+.settings-form { padding: 18px; display: grid; gap: 13px; }
+.settings-form label { display: grid; gap: 7px; }
+.settings-form label span { color: #747e92; font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.settings-form input { height: 38px; min-width: 0; padding: 0 12px; color: #d8dbe4; border: 1px solid #222635; border-radius: 9px; outline: 0; background: #11151e; font-size: 12px; }
+.settings-form input:focus { border-color: #6d45d5; box-shadow: 0 0 0 3px rgba(139,92,246,.12); }
+.settings-form p { margin: 0; color: #727b8e; font-size: 11px; line-height: 1.6; }
+.settings-actions { display: grid; grid-template-columns: 1fr auto; gap: 9px; }
+.trade-detail-body { padding: 18px; display: grid; gap: 15px; }
+.trade-detail-hero { min-height: 120px; padding: 18px; display: grid; align-content: center; gap: 10px; border: 1px solid #202431; border-radius: 12px; background: #11151e; }
+.trade-detail-hero strong { font-size: 30px; letter-spacing: -.04em; }
+.trade-detail-hero p { margin: 0; font-size: 12px; font-weight: 700; }
+.trade-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+.detail-item { min-width: 0; padding: 13px; display: grid; gap: 7px; border: 1px solid #202431; border-radius: 10px; background: #11151e; }
+.detail-item span { color: #687185; font-size: 10px; }
+.detail-item strong { color: #dce1ed; font-size: 12px; overflow-wrap: anywhere; }
 .trades-panel { padding-bottom: 6px; margin-bottom: 15px; }
 .trade-filters { margin: 0 0 15px; display: grid; grid-template-columns: minmax(220px, 1fr) repeat(2, minmax(140px, auto)) auto; gap: 9px; align-items: center; }
 .trade-search, .filter-dropdown-button, .filter-reset { height: 36px; min-width: 0; color: #9aa3b6; border: 1px solid #222635; border-radius: 9px; background: #11151e; font-size: 11px; }
@@ -196,6 +213,8 @@ th { padding: 10px 12px; color: #596276; background: #11151e; font-size: 9px; fo
 .sort-header.active span { color: #9b72ff; }
 td { padding: 13px 12px; color: #818a9c; border-top: 1px solid #1b1f2b; font-size: 10px; }
 td strong { color: #cdd2de; font-size: 11px; }
+tr.clickable-row { cursor: pointer; }
+tr.clickable-row:hover td { background: rgba(139,92,246,.05); }
 .pair-token { position: relative; width: fit-content; display: inline-flex; align-items: center; outline: 0; cursor: help; }
 .pair-token:focus-visible strong, .pair-token:hover strong { color: #f5f1ff; }
 .pair-tooltip { position: absolute; left: 0; bottom: calc(100% + 9px); z-index: 35; min-width: 210px; max-width: 300px; padding: 9px 10px; display: grid; gap: 4px; color: #8f98ab; border: 1px solid #242a39; border-radius: 9px; background: #11151e; box-shadow: 0 18px 50px rgba(0,0,0,.42); opacity: 0; pointer-events: none; transform: translateY(4px); transition: opacity .16s ease, transform .16s ease; white-space: normal; }

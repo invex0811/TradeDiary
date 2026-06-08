@@ -20,6 +20,7 @@ import {
   CalendarDays,
   ChevronDown,
   CircleDollarSign,
+  KeyRound,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -204,6 +205,18 @@ const formatLastSync = (lastSyncAt: number | null, isLoading: boolean) => {
   const formatted = new Intl.DateTimeFormat("ru-RU", { dateStyle: "short", timeStyle: "short" }).format(new Date(lastSyncAt));
   return `Последняя синхронизация: ${formatted}`;
 };
+const bingxStorageKey = (uid: string) => `trade-diary:bingx:${uid}`;
+const loadBingXCredentials = (uid: string) => {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(bingxStorageKey(uid)) || "{}") as { apiKey?: unknown; secretKey?: unknown };
+    return {
+      apiKey: typeof parsed.apiKey === "string" ? parsed.apiKey : "",
+      secretKey: typeof parsed.secretKey === "string" ? parsed.secretKey : "",
+    };
+  } catch {
+    return { apiKey: "", secretKey: "" };
+  }
+};
 const normalizeTrade = (trade: RawTradeInput): Trade => {
   const openedAt = Number(trade.openedAt ?? Date.parse(String(trade.opened || Date.now())));
   const closedAt = Number(
@@ -329,7 +342,11 @@ function App() {
   const [syncWarnings, setSyncWarnings] = useState<string[]>([]);
   const [lastSyncAt, setLastSyncAt] = useState<number | null>(null);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const [bingxModalOpen, setBingxModalOpen] = useState(false);
+  const [bingxApiKey, setBingxApiKey] = useState("");
+  const [bingxSecretKey, setBingxSecretKey] = useState("");
   const profileMenuRef = useRef<HTMLDivElement | null>(null);
+  const hasBingXCredentials = Boolean(bingxApiKey.trim() && bingxSecretKey.trim());
 
   useEffect(() => onAuthStateChanged(auth, (nextUser) => {
     setUser(nextUser);
@@ -346,12 +363,44 @@ function App() {
     return () => document.removeEventListener("pointerdown", handlePointerDown);
   }, []);
 
+  useEffect(() => {
+    if (!user) return;
+    const credentials = loadBingXCredentials(user.uid);
+    setBingxApiKey(credentials.apiKey);
+    setBingxSecretKey(credentials.secretKey);
+  }, [user]);
+
+  const saveBingXCredentials = () => {
+    if (!user) return;
+    localStorage.setItem(bingxStorageKey(user.uid), JSON.stringify({
+      apiKey: bingxApiKey.trim(),
+      secretKey: bingxSecretKey.trim(),
+    }));
+    setBingxModalOpen(false);
+    setSyncMessage("BingX ключи сохранены в этом браузере");
+  };
+
   const syncBingX = async () => {
     if (!user) return;
+    if (!hasBingXCredentials) {
+      setBingxModalOpen(true);
+      setSyncMessage("Подключи BingX API ключи для синхронизации");
+      return;
+    }
     setSyncState("loading");
     try {
       const token = await user.getIdToken();
-      const response = await fetch(`${apiBaseUrl}/api/dashboard?days=730`, { headers: { Authorization: `Bearer ${token}` } });
+      const response = await fetch(`${apiBaseUrl}/api/dashboard?days=730`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          bingxApiKey: bingxApiKey.trim(),
+          bingxSecretKey: bingxSecretKey.trim(),
+        }),
+      });
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({ error: "sync failed" }));
         throw new Error(String(errorData.error || "sync failed"));
@@ -529,6 +578,9 @@ function App() {
                     <small className="last-sync-line">{formatLastSync(lastSyncAt, syncState === "loading")}</small>
                   </div>
                 </div>
+                <button className="profile-menu-action" onClick={() => setBingxModalOpen(true)}>
+                  <KeyRound size={16} /> {hasBingXCredentials ? "Обновить BingX ключи" : "Подключить BingX"}
+                </button>
                 <button className="profile-menu-action" onClick={() => void syncBingX()} disabled={syncState === "loading"}>
                   <Activity size={16} /> {syncState === "loading" ? "Синхронизирую..." : "Синхронизировать BingX"}
                 </button>
@@ -591,6 +643,41 @@ function App() {
           )}
         </section>
       </main>
+      {bingxModalOpen && (
+        <div className="modal-backdrop" onClick={() => setBingxModalOpen(false)}>
+          <section className="settings-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-head">
+              <PanelTitle title="Подключение BingX" subtitle="Ключи хранятся только в этом браузере и отправляются на backend только во время синхронизации" />
+              <button className="modal-close" onClick={() => setBingxModalOpen(false)} aria-label="Закрыть окно">×</button>
+            </div>
+            <div className="settings-form">
+              <label>
+                <span>API Key</span>
+                <input value={bingxApiKey} onChange={(event) => setBingxApiKey(event.target.value)} placeholder="BingX API Key" />
+              </label>
+              <label>
+                <span>Secret Key</span>
+                <input value={bingxSecretKey} onChange={(event) => setBingxSecretKey(event.target.value)} placeholder="BingX Secret Key" type="password" />
+              </label>
+              <p>Создавай ключ read-only, без торговли и вывода средств. Если включён IP whitelist, добавь outbound IP Railway.</p>
+              <div className="settings-actions">
+                <button className="profile-menu-action" onClick={saveBingXCredentials} disabled={!bingxApiKey.trim() || !bingxSecretKey.trim()}>
+                  <KeyRound size={16} /> Сохранить ключи
+                </button>
+                <button className="profile-menu-action" onClick={() => {
+                  if (!user) return;
+                  localStorage.removeItem(bingxStorageKey(user.uid));
+                  setBingxApiKey("");
+                  setBingxSecretKey("");
+                  setSyncMessage("BingX ключи удалены из этого браузера");
+                }}>
+                  Удалить ключи
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+      )}
     </div>
   );
 }
@@ -989,6 +1076,7 @@ function TradeTable({ title, subtitle, trades, emptyMessage, filterable = false 
   const [searchQuery, setSearchQuery] = useState("");
   const [sideFilter, setSideFilter] = useState<SideFilter>("All");
   const [resultFilter, setResultFilter] = useState<ResultFilter>("All");
+  const [selectedTrade, setSelectedTrade] = useState<Trade | null>(null);
 
   const filteredTrades = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
@@ -1076,7 +1164,7 @@ function TradeTable({ title, subtitle, trades, emptyMessage, filterable = false 
               <tr><td className="empty-cell" colSpan={8}>По выбранным фильтрам сделок нет.</td></tr>
             )}
             {sortedTrades.map((trade) => (
-              <tr key={trade.id}>
+              <tr className="clickable-row" key={trade.id} onClick={() => setSelectedTrade(trade)}>
                 <td><TradePairCell trade={trade} /></td>
                 <td><span className={`side ${trade.side.toLowerCase()}`}>{trade.side === "Long" ? <TrendingUp size={13} /> : <TrendingDown size={13} />}{trade.side}</span></td>
                 <td>{trade.opened}</td><td>{formatNumber(trade.entry)}</td><td>{formatNumber(trade.exit)}</td><td>{formatNumber(trade.size)}</td>
@@ -1087,6 +1175,9 @@ function TradeTable({ title, subtitle, trades, emptyMessage, filterable = false 
           </tbody>
         </table>
       </div>
+      {selectedTrade && (
+        <TradeDetailModal trade={selectedTrade} onClose={() => setSelectedTrade(null)} />
+      )}
     </section>
   );
 }
@@ -1111,6 +1202,46 @@ function TradePairCell({ trade }: { trade: Trade }) {
         <b>{trade.orderId || trade.id}</b>
       </span>
     </span>
+  );
+}
+
+function TradeDetailModal({ trade, onClose }: { trade: Trade; onClose: () => void }) {
+  const volume = Math.abs(trade.size * trade.entry);
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <section className="trade-detail-modal" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-head">
+          <PanelTitle title={trade.pair} subtitle={`Order ID: ${trade.orderId || trade.id}`} />
+          <button className="modal-close" onClick={onClose} aria-label="Закрыть окно">×</button>
+        </div>
+        <div className="trade-detail-body">
+          <div className="trade-detail-hero">
+            <span className={`side ${trade.side.toLowerCase()}`}>{trade.side === "Long" ? <TrendingUp size={13} /> : <TrendingDown size={13} />}{trade.side}</span>
+            <strong className={trade.pnl >= 0 ? "positive" : "negative"}>{formatSignedMoney(trade.pnl)}</strong>
+            <p className={trade.roi >= 0 ? "positive" : "negative"}>{displayPercent(trade.roi)} ROI</p>
+          </div>
+          <div className="trade-detail-grid">
+            <DetailItem label="Открытие" value={trade.opened} />
+            <DetailItem label="Закрытие" value={formatOpened(trade.closedAt)} />
+            <DetailItem label="Длительность" value={formatDuration(trade.durationMs)} />
+            <DetailItem label="Статус" value={trade.status === "Open" ? "Открыта" : "Закрыта"} />
+            <DetailItem label="Цена входа" value={formatNumber(trade.entry)} />
+            <DetailItem label="Цена выхода" value={formatNumber(trade.exit)} />
+            <DetailItem label="Размер позиции" value={formatNumber(trade.size)} />
+            <DetailItem label="Объём" value={formatMoney(volume)} />
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function DetailItem({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="detail-item">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
   );
 }
 

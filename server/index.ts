@@ -12,6 +12,10 @@ app.use(express.json());
 
 type BingXResponse<T> = { code: number; msg?: string; data: T };
 type JsonRecord = Record<string, unknown>;
+type BingXCredentials = {
+  apiKey: string;
+  secretKey: string;
+};
 
 type NormalizedTrade = {
   id: string;
@@ -54,8 +58,17 @@ async function verifyFirebaseToken(idToken?: string) {
   return response.ok;
 }
 
-function signedQuery(params: Record<string, string>) {
-  const secretKey = process.env.BINGX_SECRET_KEY;
+function resolveBingXCredentials(value: unknown): BingXCredentials {
+  const record = asRecord(value);
+  const apiKey = asString(record.bingxApiKey ?? process.env.BINGX_API_KEY).trim();
+  const secretKey = asString(record.bingxSecretKey ?? process.env.BINGX_SECRET_KEY).trim();
+  if (!apiKey || !secretKey) {
+    throw new Error("BingX API keys are not configured");
+  }
+  return { apiKey, secretKey };
+}
+
+function signedQuery(params: Record<string, string>, secretKey: string) {
   if (!secretKey) throw new Error("BINGX_SECRET_KEY is not configured");
 
   const entries = Object.entries({
@@ -67,11 +80,11 @@ function signedQuery(params: Record<string, string>) {
   return `${query}&signature=${signature}`;
 }
 
-async function bingxRequest<T>(path: string, params: Record<string, string> = {}) {
-  const apiKey = process.env.BINGX_API_KEY;
+async function bingxRequest<T>(credentials: BingXCredentials, path: string, params: Record<string, string> = {}) {
+  const apiKey = credentials.apiKey;
   if (!apiKey) throw new Error("BINGX_API_KEY is not configured");
 
-  const response = await fetch(`${bingxBaseUrl}${path}?${signedQuery(params)}`, {
+  const response = await fetch(`${bingxBaseUrl}${path}?${signedQuery(params, credentials.secretKey)}`, {
     headers: { "X-BX-APIKEY": apiKey },
   });
   const payload = (await response.json()) as BingXResponse<T>;
@@ -82,6 +95,7 @@ async function bingxRequest<T>(path: string, params: Record<string, string> = {}
 }
 
 async function collectBingXHistory(
+  credentials: BingXCredentials,
   path: string,
   startTime: number,
   endTime: number,
@@ -93,7 +107,7 @@ async function collectBingXHistory(
 
   for (let cursor = startTime; cursor < endTime; cursor += chunkMs) {
     const chunkEnd = Math.min(cursor + chunkMs - 1, endTime);
-    chunks.push(await bingxRequest<unknown>(path, {
+    chunks.push(await bingxRequest<unknown>(credentials, path, {
       ...extraParams,
       startTime: String(cursor),
       endTime: String(chunkEnd),
@@ -255,21 +269,25 @@ function mergeDurationFromOrders(fillTrades: NormalizedTrade[], orderTrades: Nor
   });
 }
 
-app.get("/api/dashboard", async (req, res) => {
+app.all("/api/dashboard", async (req, res) => {
   try {
+    if (req.method !== "GET" && req.method !== "POST") {
+      return res.status(405).json({ error: "Method not allowed" });
+    }
     const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
     if (!(await verifyFirebaseToken(token))) {
       return res.status(401).json({ error: "Unauthorized" });
     }
+    const credentials = resolveBingXCredentials(req.method === "POST" ? req.body : {});
 
     const now = Date.now();
     const historyDays = Math.max(7, Math.min(Number(req.query.days || 365), 730));
     const historyStart = now - historyDays * 24 * 60 * 60 * 1000;
     const [balance, positions, fillsResult, ordersResult] = await Promise.allSettled([
-      bingxRequest<unknown>("/openApi/swap/v2/user/balance"),
-      bingxRequest<unknown>("/openApi/swap/v2/user/positions"),
-      collectBingXHistory("/openApi/swap/v2/trade/allFillOrders", historyStart, now, 7),
-      collectBingXHistory("/openApi/swap/v2/trade/allOrders", historyStart, now, 7),
+      bingxRequest<unknown>(credentials, "/openApi/swap/v2/user/balance"),
+      bingxRequest<unknown>(credentials, "/openApi/swap/v2/user/positions"),
+      collectBingXHistory(credentials, "/openApi/swap/v2/trade/allFillOrders", historyStart, now, 7),
+      collectBingXHistory(credentials, "/openApi/swap/v2/trade/allOrders", historyStart, now, 7),
     ]);
 
     if (balance.status === "rejected") throw balance.reason;
