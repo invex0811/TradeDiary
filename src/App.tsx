@@ -24,6 +24,8 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
+  Image,
+  StickyNote,
   Search,
   Target,
   TrendingDown,
@@ -1251,12 +1253,25 @@ function SortableHeader({ label, sortKey, activeLabel, onSort }: { label: string
 }
 
 function TradePairCell({ trade }: { trade: Trade }) {
+  const hasNote = Boolean(trade.note?.trim());
+  const hasScreenshot = Boolean(trade.screenshotDataUrl || trade.screenshotUrl);
   return (
     <span className="pair-token" tabIndex={0}>
-      <strong>{trade.pair}</strong>
+      <span className="pair-token-main">
+        <strong>{trade.pair}</strong>
+        {(hasNote || hasScreenshot) && (
+          <span className="trade-markers" aria-label="У сделки есть журнал">
+            {hasNote && <StickyNote size={12} />}
+            {hasScreenshot && <Image size={12} />}
+          </span>
+        )}
+      </span>
       <span className="pair-tooltip" role="tooltip">
         <span>Order ID</span>
         <b>{trade.orderId || trade.id}</b>
+        {(hasNote || hasScreenshot) && (
+          <em>{[hasNote ? "есть описание" : "", hasScreenshot ? "есть скрин" : ""].filter(Boolean).join(" · ")}</em>
+        )}
       </span>
     </span>
   );
