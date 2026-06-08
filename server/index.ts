@@ -269,6 +269,9 @@ function mergeDurationFromOrders(fillTrades: NormalizedTrade[], orderTrades: Nor
   });
 }
 
+const errorMessage = (value: unknown) =>
+  value instanceof Error ? value.message : String(value || "Unknown error");
+
 app.all("/api/dashboard", async (req, res) => {
   try {
     if (req.method !== "GET" && req.method !== "POST") {
@@ -325,8 +328,9 @@ app.all("/api/dashboard", async (req, res) => {
         futures: trades.filter((trade) => trade.market === "futures").length,
       },
       syncWarnings: [
-        fillsResult.status === "rejected" ? "Не удалось загрузить allFillOrders, использован fallback allOrders." : "",
-        ordersResult.status === "rejected" && fillsResult.status === "rejected" ? "История сделок недоступна через BingX API." : "",
+        fillsResult.status === "rejected" ? `allFillOrders недоступен: ${errorMessage(fillsResult.reason)}. Использую fallback allOrders.` : "",
+        ordersResult.status === "rejected" ? `allOrders недоступен: ${errorMessage(ordersResult.reason)}.` : "",
+        ordersResult.status === "rejected" && fillsResult.status === "rejected" ? "История сделок сейчас недоступна через BingX API. Открытые позиции всё равно обновляются через positions." : "",
       ].filter(Boolean),
     });
   } catch (error) {
