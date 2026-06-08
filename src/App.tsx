@@ -442,7 +442,13 @@ function App() {
       const tradesRef = collection(db, "users", user.uid, "trades");
       const existingTrades = await getDocs(tradesRef);
       const existingTradeData = new Map(existingTrades.docs.map((document) => [document.id, document.data() as Partial<CachedTrade>]));
-      existingTrades.forEach((document) => batch.delete(document.ref));
+      const incomingTradeIds = new Set(normalizedTrades.map((trade) => trade.id));
+      existingTrades.forEach((document) => {
+        const data = document.data() as Partial<CachedTrade>;
+        if (data.status === "Open" && !incomingTradeIds.has(document.id)) {
+          batch.delete(document.ref);
+        }
+      });
       normalizedTrades.forEach((trade) => {
         const ref = doc(db, "users", user.uid, "trades", trade.id);
         const manualFields = existingTradeData.get(trade.id);
@@ -464,7 +470,7 @@ function App() {
       await batch.commit();
       setLastSyncAt(Date.now());
       setSyncWarnings(data.syncWarnings || []);
-      setSyncMessage(normalizedTrades.length ? `Сохранено в Firestore: ${normalizedTrades.length}` : "BingX подключён, фьючерсных сделок пока нет");
+      setSyncMessage(normalizedTrades.length ? `Обновлено из BingX: ${normalizedTrades.length}` : "BingX подключён, новых сделок API не отдал");
       setSyncState(normalizedTrades.length ? "bingx" : "empty");
     } catch (error) {
       setSyncMessage(error instanceof Error ? error.message : "Ошибка подключения BingX");
