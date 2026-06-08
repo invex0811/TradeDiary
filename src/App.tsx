@@ -66,6 +66,7 @@ type DashboardResponse = {
   trades: Array<Omit<Trade, "side" | "status"> & { side: string; status: string }>;
   marketCounts?: { futures: number };
   syncWarnings?: string[];
+  historyWindow?: { start: number; end: number };
 };
 type CachedTrade = Omit<Trade, "opened"> & {
   source: "bingx";
@@ -254,6 +255,7 @@ const extractBingXCooldownUntil = (messages: string[]) => {
 };
 const formatCooldown = (timestamp: number) =>
   new Intl.DateTimeFormat("ru-RU", { timeStyle: "short" }).format(new Date(timestamp));
+const wait = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
 const normalizeTrade = (trade: RawTradeInput): Trade => {
   const openedAt = Number(trade.openedAt ?? Date.parse(String(trade.opened || Date.now())));
   const closedAt = Number(
@@ -390,6 +392,47 @@ function App() {
   const hasBingXCredentials = Boolean(bingxApiKey.trim() && bingxSecretKey.trim());
   const syncBlockedByCooldown = Boolean(syncCooldownUntil && syncCooldownUntil > Date.now());
 
+  const saveDashboardData = async (data: DashboardResponse, deleteMissingOpen: boolean) => {
+    if (!user) return [];
+    setBalance(data.balance);
+    const normalizedTrades = data.trades.map((trade) => normalizeTrade(trade));
+    const batch = writeBatch(db);
+    const tradesRef = collection(db, "users", user.uid, "trades");
+    const existingTrades = await getDocs(tradesRef);
+    const existingTradeData = new Map(existingTrades.docs.map((document) => [document.id, document.data() as Partial<CachedTrade>]));
+    const incomingTradeIds = new Set(normalizedTrades.map((trade) => trade.id));
+    if (deleteMissingOpen) {
+      existingTrades.forEach((document) => {
+        const data = document.data() as Partial<CachedTrade>;
+        if (data.status === "Open" && !incomingTradeIds.has(document.id)) {
+          batch.delete(document.ref);
+        }
+      });
+    }
+    normalizedTrades.forEach((trade) => {
+      const ref = doc(db, "users", user.uid, "trades", trade.id);
+      const manualFields = existingTradeData.get(trade.id);
+      batch.set(ref, {
+        ...trade,
+        note: typeof manualFields?.note === "string" ? manualFields.note : trade.note,
+        screenshotDataUrl: typeof manualFields?.screenshotDataUrl === "string" ? manualFields.screenshotDataUrl : trade.screenshotDataUrl,
+        screenshotUrl: typeof manualFields?.screenshotUrl === "string" ? manualFields.screenshotUrl : trade.screenshotUrl,
+        source: "bingx",
+        syncedAt: serverTimestamp(),
+      } satisfies CachedTrade, { merge: true });
+    });
+    const metaRef = doc(db, "users", user.uid, "meta", "bingx");
+    batch.set(metaRef, {
+      lastSyncAt: serverTimestamp(),
+      balance: data.balance,
+      marketCounts: data.marketCounts || { futures: normalizedTrades.length },
+      lastHistoryWindow: data.historyWindow || null,
+    }, { merge: true });
+    await batch.commit();
+    setLastSyncAt(Date.now());
+    return normalizedTrades;
+  };
+
   useEffect(() => onAuthStateChanged(auth, (nextUser) => {
     setUser(nextUser);
     setAuthReady(true);
@@ -452,45 +495,74 @@ function App() {
         throw new Error(String(errorData.error || "sync failed"));
       }
       const data = await response.json() as DashboardResponse;
-      setBalance(data.balance);
-      const normalizedTrades = data.trades.map((trade) => normalizeTrade(trade));
-      const batch = writeBatch(db);
-      const tradesRef = collection(db, "users", user.uid, "trades");
-      const existingTrades = await getDocs(tradesRef);
-      const existingTradeData = new Map(existingTrades.docs.map((document) => [document.id, document.data() as Partial<CachedTrade>]));
-      const incomingTradeIds = new Set(normalizedTrades.map((trade) => trade.id));
-      existingTrades.forEach((document) => {
-        const data = document.data() as Partial<CachedTrade>;
-        if (data.status === "Open" && !incomingTradeIds.has(document.id)) {
-          batch.delete(document.ref);
-        }
-      });
-      normalizedTrades.forEach((trade) => {
-        const ref = doc(db, "users", user.uid, "trades", trade.id);
-        const manualFields = existingTradeData.get(trade.id);
-        batch.set(ref, {
-          ...trade,
-          note: typeof manualFields?.note === "string" ? manualFields.note : trade.note,
-          screenshotDataUrl: typeof manualFields?.screenshotDataUrl === "string" ? manualFields.screenshotDataUrl : trade.screenshotDataUrl,
-          screenshotUrl: typeof manualFields?.screenshotUrl === "string" ? manualFields.screenshotUrl : trade.screenshotUrl,
-          source: "bingx",
-          syncedAt: serverTimestamp(),
-        } satisfies CachedTrade, { merge: true });
-      });
-      const metaRef = doc(db, "users", user.uid, "meta", "bingx");
-      batch.set(metaRef, {
-        lastSyncAt: serverTimestamp(),
-        balance: data.balance,
-        marketCounts: data.marketCounts || { futures: normalizedTrades.length },
-      }, { merge: true });
-      await batch.commit();
-      setLastSyncAt(Date.now());
+      const normalizedTrades = await saveDashboardData(data, true);
       setSyncWarnings(data.syncWarnings || []);
       setSyncCooldownUntil(extractBingXCooldownUntil(data.syncWarnings || []));
       setSyncMessage(normalizedTrades.length ? `Обновлено из BingX: ${normalizedTrades.length}` : "BingX подключён, новых сделок API не отдал");
       setSyncState(normalizedTrades.length ? "bingx" : "empty");
     } catch (error) {
       setSyncMessage(error instanceof Error ? error.message : "Ошибка подключения BingX");
+      setSyncState("error");
+    }
+  };
+
+  const syncBingXHistory = async () => {
+    if (!user) return;
+    if (syncBlockedByCooldown && syncCooldownUntil) {
+      setSyncMessage(`BingX history API разблокируется в ${formatCooldown(syncCooldownUntil)}`);
+      return;
+    }
+    if (!hasBingXCredentials) {
+      setBingxModalOpen(true);
+      setSyncMessage("Подключи BingX API ключи для загрузки истории");
+      return;
+    }
+    setSyncState("loading");
+    setSyncWarnings([]);
+    try {
+      const token = await user.getIdToken();
+      const windowMs = 7 * 24 * 60 * 60 * 1000 - 60_000;
+      const windowsToLoad = 26;
+      let totalTrades = 0;
+      const warnings: string[] = [];
+
+      for (let index = 0; index < windowsToLoad; index += 1) {
+        const end = Date.now() - index * windowMs;
+        const start = end - windowMs;
+        setSyncMessage(`Загружаю историю BingX: окно ${index + 1}/${windowsToLoad}`);
+        const response = await fetch(`${apiBaseUrl}/api/dashboard?start=${start}&end=${end}`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            bingxApiKey: bingxApiKey.trim(),
+            bingxSecretKey: bingxSecretKey.trim(),
+          }),
+        });
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({ error: "history sync failed" }));
+          throw new Error(String(errorData.error || "history sync failed"));
+        }
+        const data = await response.json() as DashboardResponse;
+        const normalizedTrades = await saveDashboardData(data, false);
+        totalTrades += normalizedTrades.filter((trade) => trade.status === "Closed").length;
+        warnings.push(...(data.syncWarnings || []));
+        const cooldownUntil = extractBingXCooldownUntil(warnings);
+        if (cooldownUntil) {
+          setSyncCooldownUntil(cooldownUntil);
+          break;
+        }
+        await wait(1300);
+      }
+
+      setSyncWarnings(warnings);
+      setSyncCooldownUntil(extractBingXCooldownUntil(warnings));
+      setSyncMessage(totalTrades ? `История BingX загружена: ${totalTrades} записей` : "История BingX загружена, новых закрытых сделок API не отдал");
+      setSyncState(totalTrades ? "bingx" : "empty");
+    } catch (error) {
+      setSyncMessage(error instanceof Error ? error.message : "Ошибка загрузки истории BingX");
       setSyncState("error");
     }
   };
@@ -641,6 +713,9 @@ function App() {
                 </button>
                 <button className="profile-menu-action" onClick={() => void syncBingX()} disabled={syncState === "loading" || syncBlockedByCooldown}>
                   <Activity size={16} /> {syncState === "loading" ? "Синхронизирую..." : syncBlockedByCooldown && syncCooldownUntil ? `Пауза до ${formatCooldown(syncCooldownUntil)}` : "Синхронизировать BingX"}
+                </button>
+                <button className="profile-menu-action" onClick={() => void syncBingXHistory()} disabled={syncState === "loading" || syncBlockedByCooldown}>
+                  <CalendarDays size={16} /> Загрузить историю 180 дней
                 </button>
                 <button className="profile-menu-action danger" onClick={() => signOut(auth)}>
                   <LogOut size={16} /> Выйти из аккаунта
