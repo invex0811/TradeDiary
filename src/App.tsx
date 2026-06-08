@@ -33,7 +33,7 @@ import {
   Wallet,
   X,
 } from "lucide-react";
-import { onAuthStateChanged, signInWithPopup, signOut, type User } from "firebase/auth";
+import { getRedirectResult, onAuthStateChanged, signInWithPopup, signInWithRedirect, signOut, type User } from "firebase/auth";
 import { collection, doc, getDocs, onSnapshot, serverTimestamp, setDoc, writeBatch, type DocumentData } from "firebase/firestore";
 import { Navigate, NavLink, Route, Routes, useLocation } from "react-router-dom";
 import { auth, db, googleProvider } from "./firebase";
@@ -256,6 +256,8 @@ const extractBingXCooldownUntil = (messages: string[]) => {
 const formatCooldown = (timestamp: number) =>
   new Intl.DateTimeFormat("ru-RU", { timeStyle: "short" }).format(new Date(timestamp));
 const wait = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+const isMobileAuthBrowser = () =>
+  /Android|iPhone|iPad|iPod|Mobile|CriOS|FxiOS|EdgiOS/i.test(navigator.userAgent);
 const normalizeTrade = (trade: RawTradeInput): Trade => {
   const openedAt = Number(trade.openedAt ?? Date.parse(String(trade.opened || Date.now())));
   const closedAt = Number(
@@ -384,6 +386,8 @@ function App() {
   const [syncWarnings, setSyncWarnings] = useState<string[]>([]);
   const [syncCooldownUntil, setSyncCooldownUntil] = useState<number | null>(null);
   const [lastSyncAt, setLastSyncAt] = useState<number | null>(null);
+  const [loginState, setLoginState] = useState<"idle" | "loading">("idle");
+  const [loginMessage, setLoginMessage] = useState("");
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const [bingxModalOpen, setBingxModalOpen] = useState(false);
   const [bingxApiKey, setBingxApiKey] = useState("");
@@ -437,6 +441,35 @@ function App() {
     setUser(nextUser);
     setAuthReady(true);
   }), []);
+
+  useEffect(() => {
+    getRedirectResult(auth)
+      .catch((error) => {
+        setLoginMessage(error instanceof Error ? error.message : "Не удалось завершить вход через Google");
+      })
+      .finally(() => setLoginState("idle"));
+  }, []);
+
+  const signInWithGoogle = async () => {
+    setLoginMessage("");
+    setLoginState("loading");
+    try {
+      if (isMobileAuthBrowser()) {
+        await signInWithRedirect(auth, googleProvider);
+        return;
+      }
+      await signInWithPopup(auth, googleProvider);
+    } catch (error) {
+      const code = typeof error === "object" && error !== null && "code" in error ? String((error as { code?: unknown }).code) : "";
+      if (code.includes("popup") || code.includes("operation-not-supported")) {
+        await signInWithRedirect(auth, googleProvider);
+        return;
+      }
+      setLoginMessage(error instanceof Error ? error.message : "Не удалось войти через Google");
+    } finally {
+      setLoginState("idle");
+    }
+  };
 
   useEffect(() => {
     const handlePointerDown = (event: PointerEvent) => {
@@ -661,10 +694,11 @@ function App() {
           <p className="eyebrow">BingX analytics workspace</p>
           <h1>Твой трейдинг.<br /><span>Без самообмана.</span></h1>
           <p className="login-copy">Автоматический дневник сделок, статистика и аналитика результатов в одном тёмном интерфейсе.</p>
-          <button className="google-button" onClick={() => signInWithPopup(auth, googleProvider)}>
+          <button className="google-button" onClick={() => void signInWithGoogle()} disabled={loginState === "loading"}>
             <span className="google-g">G</span>
-            Войти через Google
+            {loginState === "loading" ? "Открываю Google..." : "Войти через Google"}
           </button>
+          {loginMessage && <p className="login-error">{loginMessage}</p>}
           <p className="login-note">Данные BingX доступны только после авторизации.</p>
         </section>
       </main>
