@@ -186,16 +186,16 @@ function normalizePosition(position: JsonRecord): NormalizedTrade | null {
 function normalizeFill(fill: JsonRecord): NormalizedTrade | null {
   const symbol = asString(fill.symbol);
   const rawOrderId = asString(fill.orderId ?? fill.id);
-  const id = asString(fill.tradeId ?? fill.orderId ?? fill.id);
+  const id = asString(fill.tradeId ?? fill.fillId ?? fill.orderId ?? fill.id);
   if (!symbol || !id) return null;
 
-  const quantity = asNumber(fill.quantity ?? fill.qty ?? fill.executedQty);
-  const entry = asNumber(fill.price ?? fill.avgPrice);
+  const quantity = Math.abs(asNumber(fill.quantity ?? fill.qty ?? fill.executedQty ?? fill.fillQty ?? fill.volume ?? fill.amount));
+  const entry = asNumber(fill.price ?? fill.avgPrice ?? fill.fillPrice);
   const pnl = asNumber(fill.realizedPnl ?? fill.realizedProfit ?? fill.profit);
-  const quoteAmount = Math.abs(asNumber(fill.quoteQty ?? fill.quoteVolume ?? quantity * entry));
+  const quoteAmount = Math.abs(asNumber(fill.quoteQty ?? fill.quoteVolume ?? fill.quoteAmount ?? quantity * entry));
   const sideValue = asString(fill.positionSide ?? fill.side).toUpperCase();
   const side: "Long" | "Short" = sideValue === "SHORT" || sideValue === "SELL" ? "Short" : "Long";
-  const timestamp = asNumber(fill.time ?? fill.tradeTime ?? fill.updateTime ?? Date.now());
+  const timestamp = asNumber(fill.time ?? fill.tradeTime ?? fill.fillTime ?? fill.timestamp ?? fill.updateTime ?? Date.now());
 
   return {
     id: `futures-fill-${id}`,
@@ -221,7 +221,7 @@ function normalizeOrder(order: JsonRecord): NormalizedTrade | null {
   if (!symbol || !id) return null;
 
   const status = asString(order.status).toUpperCase();
-  const quantity = asNumber(order.executedQty ?? order.quantity ?? order.origQty);
+  const quantity = Math.abs(asNumber(order.executedQty ?? order.quantity ?? order.origQty ?? order.volume ?? order.amount));
   const entry = asNumber(order.avgPrice ?? order.price);
   const pnl = asNumber(order.profit ?? order.realizedProfit ?? order.realizedPnl);
   const margin = Math.abs(quantity * entry);
@@ -333,8 +333,13 @@ app.all("/api/dashboard", async (req, res) => {
       fillTrades.filter((trade): trade is NormalizedTrade => trade !== null),
       orderTrades.filter((trade): trade is NormalizedTrade => trade !== null),
     );
+    const fillTradesWithPnl = mergedFillTrades.filter(hasRealizedPnl);
+    const fillOrderIds = new Set(fillTradesWithPnl.map((trade) => trade.orderId));
     const orderTradesWithPnl = orderTrades.filter(hasRealizedPnl);
-    const sourceTrades = mergedFillTrades.length ? mergedFillTrades : orderTradesWithPnl;
+    const sourceTrades = [
+      ...fillTradesWithPnl,
+      ...orderTradesWithPnl.filter((trade) => trade !== null && !fillOrderIds.has(trade.orderId)),
+    ];
     const closedTrades = uniqueTrades(sourceTrades
       .filter((trade): trade is NormalizedTrade => trade !== null)
       .filter((trade) => trade.size > 0));

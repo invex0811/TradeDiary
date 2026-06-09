@@ -55,8 +55,14 @@ type Trade = {
   roi: number;
   status: "Closed" | "Open";
   note?: string;
+  entryReason?: string;
+  exitReason?: string;
+  tradePlan?: string;
+  tradeMistake?: string;
+  tradeLesson?: string;
   screenshotDataUrl?: string;
   screenshotUrl?: string;
+  screenshotUrls?: string[];
 };
 
 type DashboardResponse = {
@@ -89,8 +95,14 @@ type RawTradeInput = {
   pnl?: unknown;
   roi?: unknown;
   note?: unknown;
+  entryReason?: unknown;
+  exitReason?: unknown;
+  tradePlan?: unknown;
+  tradeMistake?: unknown;
+  tradeLesson?: unknown;
   screenshotDataUrl?: unknown;
   screenshotUrl?: unknown;
+  screenshotUrls?: unknown;
 };
 
 type SortKey = "pair" | "side" | "opened" | "entry" | "exit" | "size" | "pnl" | "roi";
@@ -245,6 +257,15 @@ const tradingViewPreviewUrl = (value: string) => {
   const id = match[1];
   return `https://s3.tradingview.com/snapshots/${id[0].toLowerCase()}/${id}.png`;
 };
+const normalizeTradingViewUrls = (value: unknown, fallback = "") => {
+  const values = Array.isArray(value) ? value : [];
+  const normalized = values
+    .map((item) => normalizeTradingViewUrl(String(item ?? "")))
+    .filter(Boolean);
+  const fallbackUrl = normalizeTradingViewUrl(fallback);
+  const unique = new Set([fallbackUrl, ...normalized].filter(Boolean));
+  return [...unique];
+};
 const extractBingXCooldownUntil = (messages: string[]) => {
   const timestamps = messages
     .map((message) => message.match(/unblocked after (\d{13})/)?.[1])
@@ -282,8 +303,14 @@ const normalizeTrade = (trade: RawTradeInput): Trade => {
     roi: Number(trade.roi || 0),
     status: trade.status === "Open" ? "Open" : "Closed",
     note: typeof trade.note === "string" ? trade.note : "",
+    entryReason: typeof trade.entryReason === "string" ? trade.entryReason : "",
+    exitReason: typeof trade.exitReason === "string" ? trade.exitReason : "",
+    tradePlan: typeof trade.tradePlan === "string" ? trade.tradePlan : "",
+    tradeMistake: typeof trade.tradeMistake === "string" ? trade.tradeMistake : "",
+    tradeLesson: typeof trade.tradeLesson === "string" ? trade.tradeLesson : "",
     screenshotDataUrl: typeof trade.screenshotDataUrl === "string" ? trade.screenshotDataUrl : "",
     screenshotUrl: typeof trade.screenshotUrl === "string" ? trade.screenshotUrl : "",
+    screenshotUrls: normalizeTradingViewUrls(trade.screenshotUrls, typeof trade.screenshotUrl === "string" ? trade.screenshotUrl : ""),
   };
 };
 const tradeFromFirestore = (data: DocumentData): Trade => normalizeTrade(data as CachedTrade);
@@ -419,8 +446,14 @@ function App() {
       batch.set(ref, {
         ...trade,
         note: typeof manualFields?.note === "string" ? manualFields.note : trade.note,
+        entryReason: typeof manualFields?.entryReason === "string" ? manualFields.entryReason : trade.entryReason,
+        exitReason: typeof manualFields?.exitReason === "string" ? manualFields.exitReason : trade.exitReason,
+        tradePlan: typeof manualFields?.tradePlan === "string" ? manualFields.tradePlan : trade.tradePlan,
+        tradeMistake: typeof manualFields?.tradeMistake === "string" ? manualFields.tradeMistake : trade.tradeMistake,
+        tradeLesson: typeof manualFields?.tradeLesson === "string" ? manualFields.tradeLesson : trade.tradeLesson,
         screenshotDataUrl: typeof manualFields?.screenshotDataUrl === "string" ? manualFields.screenshotDataUrl : trade.screenshotDataUrl,
         screenshotUrl: typeof manualFields?.screenshotUrl === "string" ? manualFields.screenshotUrl : trade.screenshotUrl,
+        screenshotUrls: Array.isArray(manualFields?.screenshotUrls) ? manualFields.screenshotUrls : trade.screenshotUrls,
         source: "bingx",
         syncedAt: serverTimestamp(),
       } satisfies CachedTrade, { merge: true });
@@ -1400,8 +1433,15 @@ function SortableHeader({ label, sortKey, activeLabel, onSort }: { label: string
 }
 
 function TradePairCell({ trade }: { trade: Trade }) {
-  const hasNote = Boolean(trade.note?.trim());
-  const hasScreenshot = Boolean(trade.screenshotDataUrl || trade.screenshotUrl);
+  const hasNote = Boolean(
+    trade.note?.trim() ||
+    trade.entryReason?.trim() ||
+    trade.exitReason?.trim() ||
+    trade.tradePlan?.trim() ||
+    trade.tradeMistake?.trim() ||
+    trade.tradeLesson?.trim(),
+  );
+  const hasScreenshot = Boolean(trade.screenshotDataUrl || trade.screenshotUrl || trade.screenshotUrls?.length);
   return (
     <span className="pair-token" tabIndex={0}>
       <span className="pair-token-main">
@@ -1426,27 +1466,125 @@ function TradePairCell({ trade }: { trade: Trade }) {
 
 function TradeDetailModal({ userId, trade, onClose }: { userId: string; trade: Trade; onClose: () => void }) {
   const [note, setNote] = useState(trade.note || "");
+  const [entryReason, setEntryReason] = useState(trade.entryReason || "");
+  const [exitReason, setExitReason] = useState(trade.exitReason || "");
+  const [tradePlan, setTradePlan] = useState(trade.tradePlan || "");
+  const [tradeMistake, setTradeMistake] = useState(trade.tradeMistake || "");
+  const [tradeLesson, setTradeLesson] = useState(trade.tradeLesson || "");
   const [screenshotDataUrl, setScreenshotDataUrl] = useState(trade.screenshotDataUrl || "");
-  const [screenshotUrl, setScreenshotUrl] = useState(trade.screenshotUrl || "");
+  const initialScreenshotUrls = useMemo(() => normalizeTradingViewUrls(trade.screenshotUrls, trade.screenshotUrl || ""), [trade.screenshotUrl, trade.screenshotUrls]);
+  const [screenshotUrls, setScreenshotUrls] = useState(() => {
+    return initialScreenshotUrls.length ? initialScreenshotUrls : [""];
+  });
+  const [expandedScreenshot, setExpandedScreenshot] = useState<{ imageUrl: string; sourceUrl: string; label: string } | null>(null);
+  const [showUnsavedPrompt, setShowUnsavedPrompt] = useState(false);
+  const [savingJournal, setSavingJournal] = useState(false);
   const [saveMessage, setSaveMessage] = useState("");
+  const [savedJournalSnapshot, setSavedJournalSnapshot] = useState(() => JSON.stringify({
+    note: trade.note || "",
+    entryReason: trade.entryReason || "",
+    exitReason: trade.exitReason || "",
+    tradePlan: trade.tradePlan || "",
+    tradeMistake: trade.tradeMistake || "",
+    tradeLesson: trade.tradeLesson || "",
+    screenshotDataUrl: trade.screenshotDataUrl || "",
+    screenshotUrls: initialScreenshotUrls,
+  }));
   const volume = Math.abs(trade.size * trade.entry);
-  const normalizedScreenshotUrl = normalizeTradingViewUrl(screenshotUrl);
-  const previewUrl = screenshotDataUrl || tradingViewPreviewUrl(screenshotUrl);
+  const normalizedScreenshotUrls = screenshotUrls
+    .map((url) => normalizeTradingViewUrl(url))
+    .filter(Boolean);
+  const uniqueScreenshotUrls = [...new Set(normalizedScreenshotUrls)];
+  const screenshotPreviews = [
+    ...(screenshotDataUrl ? [{ id: "uploaded", imageUrl: screenshotDataUrl, sourceUrl: "", label: "Файл" }] : []),
+    ...uniqueScreenshotUrls.map((url, index) => ({
+      id: url,
+      imageUrl: tradingViewPreviewUrl(url),
+      sourceUrl: url,
+      label: `TV ${index + 1}`,
+    })),
+  ].filter((item) => item.imageUrl);
+  const currentJournalSnapshot = JSON.stringify({
+    note,
+    entryReason,
+    exitReason,
+    tradePlan,
+    tradeMistake,
+    tradeLesson,
+    screenshotDataUrl,
+    screenshotUrls: screenshotUrls.map((url) => url.trim()).filter(Boolean),
+  });
+  const hasUnsavedJournal = currentJournalSnapshot !== savedJournalSnapshot;
 
   const saveTradeJournal = async () => {
-    const cleanScreenshotUrl = normalizeTradingViewUrl(screenshotUrl);
-    if (screenshotUrl.trim() && !cleanScreenshotUrl) {
-      setSaveMessage("Вставь ссылку TradingView формата https://www.tradingview.com/x/...");
+    const invalidScreenshotUrl = screenshotUrls.find((url) => url.trim() && !normalizeTradingViewUrl(url));
+    if (invalidScreenshotUrl) {
+      setSaveMessage("Вставь ссылки TradingView формата https://www.tradingview.com/x/...");
+      return false;
+    }
+    const cleanScreenshotUrls = [...new Set(screenshotUrls.map(normalizeTradingViewUrl).filter(Boolean))];
+    setSavingJournal(true);
+    try {
+      await setDoc(doc(db, "users", userId, "trades", trade.id), {
+      note: note.trim(),
+      entryReason: entryReason.trim(),
+      exitReason: exitReason.trim(),
+      tradePlan: tradePlan.trim(),
+      tradeMistake: tradeMistake.trim(),
+      tradeLesson: tradeLesson.trim(),
+      screenshotDataUrl,
+      screenshotUrl: cleanScreenshotUrls[0] || "",
+      screenshotUrls: cleanScreenshotUrls,
+      journalUpdatedAt: serverTimestamp(),
+      }, { merge: true });
+    } finally {
+      setSavingJournal(false);
+    }
+    setScreenshotUrls(cleanScreenshotUrls.length ? cleanScreenshotUrls : [""]);
+    setSavedJournalSnapshot(JSON.stringify({
+      note: note.trim(),
+      entryReason: entryReason.trim(),
+      exitReason: exitReason.trim(),
+      tradePlan: tradePlan.trim(),
+      tradeMistake: tradeMistake.trim(),
+      tradeLesson: tradeLesson.trim(),
+      screenshotDataUrl,
+      screenshotUrls: cleanScreenshotUrls,
+    }));
+    setSaveMessage("Сохранено");
+    return true;
+  };
+
+  const requestCloseTradeModal = () => {
+    if (hasUnsavedJournal) {
+      setShowUnsavedPrompt(true);
       return;
     }
-    await setDoc(doc(db, "users", userId, "trades", trade.id), {
-      note: note.trim(),
-      screenshotDataUrl,
-      screenshotUrl: cleanScreenshotUrl,
-      journalUpdatedAt: serverTimestamp(),
-    }, { merge: true });
-    setScreenshotUrl(cleanScreenshotUrl);
-    setSaveMessage("Сохранено");
+    onClose();
+  };
+
+  const saveAndCloseTradeModal = async () => {
+    try {
+      const saved = await saveTradeJournal();
+      if (saved) onClose();
+    } catch (error) {
+      setSaveMessage(error instanceof Error ? error.message : "Не удалось сохранить журнал");
+    }
+  };
+
+  const updateScreenshotUrl = (index: number, value: string) => {
+    setScreenshotUrls((currentUrls) => currentUrls.map((url, urlIndex) => urlIndex === index ? value : url));
+  };
+
+  const addScreenshotUrl = () => {
+    setScreenshotUrls((currentUrls) => [...currentUrls, ""]);
+  };
+
+  const removeScreenshotUrl = (index: number) => {
+    setScreenshotUrls((currentUrls) => {
+      const nextUrls = currentUrls.filter((_, urlIndex) => urlIndex !== index);
+      return nextUrls.length ? nextUrls : [""];
+    });
   };
 
   const uploadScreenshot = (file?: File) => {
@@ -1468,11 +1606,11 @@ function TradeDetailModal({ userId, trade, onClose }: { userId: string; trade: T
   };
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop" onClick={requestCloseTradeModal}>
       <section className="trade-detail-modal" onClick={(event) => event.stopPropagation()}>
         <div className="modal-head">
           <PanelTitle title={trade.pair} subtitle={`Order ID: ${trade.orderId || trade.id}`} />
-          <button className="modal-close" onClick={onClose} aria-label="Закрыть окно">×</button>
+          <button className="modal-close" onClick={requestCloseTradeModal} aria-label="Закрыть окно">×</button>
         </div>
         <div className="trade-detail-body">
           <div className="trade-detail-hero">
@@ -1491,14 +1629,46 @@ function TradeDetailModal({ userId, trade, onClose }: { userId: string; trade: T
             <DetailItem label="Объём" value={formatMoney(volume)} />
           </div>
           <div className="trade-journal">
+            <div className="journal-form-grid">
+              <label>
+                <span>Причина входа</span>
+                <input value={entryReason} onChange={(event) => setEntryReason(event.target.value)} placeholder="Сетап, уровень, сигнал..." />
+              </label>
+              <label>
+                <span>Причина выхода</span>
+                <input value={exitReason} onChange={(event) => setExitReason(event.target.value)} placeholder="Тейк, стоп, ручное закрытие..." />
+              </label>
+              <label>
+                <span>План сделки</span>
+                <textarea value={tradePlan} onChange={(event) => setTradePlan(event.target.value)} placeholder="Что хотел увидеть, где риск, где цель..." />
+              </label>
+              <label>
+                <span>Ошибка</span>
+                <textarea value={tradeMistake} onChange={(event) => setTradeMistake(event.target.value)} placeholder="Что сделал не по плану..." />
+              </label>
+              <label className="journal-wide">
+                <span>Вывод</span>
+                <textarea value={tradeLesson} onChange={(event) => setTradeLesson(event.target.value)} placeholder="Что повторить или убрать в следующий раз..." />
+              </label>
+            </div>
             <label>
-              <span>Описание сделки</span>
-              <textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="План, причина входа, ошибка, эмоции, вывод..." />
+              <span>Дополнительное описание</span>
+              <textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="Эмоции, контекст рынка, детали сопровождения..." />
             </label>
-            <label>
-              <span>TradingView ссылка</span>
-              <input value={screenshotUrl} onChange={(event) => setScreenshotUrl(event.target.value)} placeholder="https://www.tradingview.com/x/WizqhF6V/" />
-            </label>
+            <div className="tv-links-block">
+              <div className="journal-section-head">
+                <span>TradingView ссылки</span>
+                <button className="add-link-button" type="button" onClick={addScreenshotUrl} aria-label="Добавить ссылку TradingView" title="Добавить ещё одну ссылку TradingView" data-tooltip="Добавить ещё одну ссылку TradingView">+</button>
+              </div>
+              <div className="tv-link-list">
+                {screenshotUrls.map((url, index) => (
+                  <label className="tv-link-row" key={index}>
+                    <input value={url} onChange={(event) => updateScreenshotUrl(index, event.target.value)} placeholder="https://www.tradingview.com/x/WizqhF6V/" />
+                    <button type="button" onClick={() => removeScreenshotUrl(index)} disabled={screenshotUrls.length === 1 && !url.trim()}>Удалить</button>
+                  </label>
+                ))}
+              </div>
+            </div>
             <div className="screenshot-uploader">
               <div>
                 <span>Скрин TradingView</span>
@@ -1509,24 +1679,60 @@ function TradeDetailModal({ userId, trade, onClose }: { userId: string; trade: T
                 <input accept="image/*" type="file" onChange={(event) => uploadScreenshot(event.target.files?.[0])} />
               </label>
             </div>
-            {previewUrl && (
-              <div className="trade-screenshot">
-                <img src={previewUrl} alt="TradingView screenshot" />
-                {normalizedScreenshotUrl && <a href={normalizedScreenshotUrl} target="_blank" rel="noreferrer">Открыть в TradingView</a>}
-                <button onClick={() => {
-                  setScreenshotDataUrl("");
-                  setScreenshotUrl("");
-                  setSaveMessage("Скрин удалён, нажми сохранить");
-                }}>Удалить скрин</button>
+            {screenshotPreviews.length > 0 && (
+              <div className="trade-screenshots-grid">
+                {screenshotPreviews.map((preview) => (
+                  <div className="trade-screenshot" key={preview.id}>
+                    <button className="screenshot-preview-button" type="button" onClick={() => setExpandedScreenshot(preview)} aria-label="Открыть скрин крупно">
+                      <img src={preview.imageUrl} alt="TradingView screenshot" />
+                    </button>
+                    <div className="screenshot-actions">
+                      <span>{preview.label}</span>
+                      {preview.sourceUrl && <a href={preview.sourceUrl} target="_blank" rel="noreferrer">Открыть в TradingView</a>}
+                      {preview.id === "uploaded" && (
+                        <button type="button" onClick={() => {
+                          setScreenshotDataUrl("");
+                          setSaveMessage("Файл скрина удалён, нажми сохранить");
+                        }}>Удалить файл</button>
+                      )}
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
             <div className="journal-actions">
-              <button className="profile-menu-action" onClick={() => void saveTradeJournal()}>Сохранить описание</button>
+              <button className="journal-save-button" onClick={() => void saveTradeJournal()} disabled={savingJournal}>{savingJournal ? "Сохраняю..." : "Сохранить журнал"}</button>
               {saveMessage && <span>{saveMessage}</span>}
             </div>
           </div>
         </div>
       </section>
+      {showUnsavedPrompt && (
+        <div className="unsaved-dialog" onClick={(event) => event.stopPropagation()}>
+          <h3>Журнал не сохранён</h3>
+          <p>Ты изменил описание сделки. Сохранить изменения перед закрытием?</p>
+          <div className="unsaved-actions">
+            <button className="journal-save-button" onClick={() => void saveAndCloseTradeModal()} disabled={savingJournal}>{savingJournal ? "Сохраняю..." : "Сохранить и выйти"}</button>
+            <button className="ghost-action" onClick={onClose}>Выйти без сохранения</button>
+            <button className="ghost-action" onClick={() => setShowUnsavedPrompt(false)}>Остаться</button>
+          </div>
+        </div>
+      )}
+      {expandedScreenshot && (
+        <div className="screenshot-lightbox" onClick={(event) => {
+          event.stopPropagation();
+          setExpandedScreenshot(null);
+        }}>
+          <button className="modal-close" onClick={() => setExpandedScreenshot(null)} aria-label="Закрыть скрин">×</button>
+          <div className="screenshot-lightbox-content" onClick={(event) => event.stopPropagation()}>
+            <img src={expandedScreenshot.imageUrl} alt="TradingView screenshot large" />
+            <div className="screenshot-lightbox-actions">
+              <span>{expandedScreenshot.label}</span>
+              <a href={expandedScreenshot.sourceUrl || expandedScreenshot.imageUrl} target="_blank" rel="noreferrer">Открыть оригинал</a>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
