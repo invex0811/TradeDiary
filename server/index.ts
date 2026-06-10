@@ -53,6 +53,27 @@ const positiveNumber = (...values: unknown[]) => {
   }
   return 0;
 };
+const stableTradePart = (value: unknown) =>
+  asString(value).trim().replace(/[^a-z0-9._-]+/gi, "_") || "unknown";
+const closedFuturesTradeId = (
+  symbol: string,
+  side: "Long" | "Short",
+  openedAt: number,
+  closedAt: number,
+  pnl: number,
+  size: number,
+  positionId?: string,
+) =>
+  positionId
+    ? `futures-closed-${stableTradePart(positionId)}`
+    : `futures-closed-${[
+      symbol,
+      side,
+      openedAt,
+      closedAt,
+      pnl.toFixed(8),
+      size.toFixed(8),
+    ].map(stableTradePart).join("-")}`;
 
 async function verifyFirebaseToken(idToken?: string) {
   const apiKey = process.env.FIREBASE_WEB_API_KEY;
@@ -233,10 +254,10 @@ function normalizePositionHistory(position: JsonRecord): NormalizedTrade | null 
   const pnl = asNumber(position.realisedProfit ?? position.realizedProfit ?? position.realisedPnl ?? position.realizedPnl ?? position.netProfit ?? position.pnl);
   const leverage = positiveNumber(position.leverage);
   const margin = Math.abs(leverage ? (entry * size) / leverage : entry * size);
-  const id = rawPositionId || `${symbol}-${side}-${openedAt}-${closedAt}`;
+  const id = closedFuturesTradeId(symbol, side, openedAt, closedAt, pnl, size, rawPositionId);
 
   return {
-    id: `futures-position-history-${id}`,
+    id,
     orderId: id,
     market: "futures",
     pair: symbol,
@@ -272,9 +293,10 @@ function normalizeOrder(order: JsonRecord): NormalizedTrade | null {
   const side: "Long" | "Short" = sideValue === "SHORT" || sideValue === "SELL" ? "Short" : "Long";
   const timestamp = asNumber(order.time ?? order.updateTime ?? Date.now());
   const closeTimestamp = asNumber(order.updateTime ?? order.time ?? timestamp);
+  const stableId = closedFuturesTradeId(symbol, side, timestamp, closeTimestamp, pnl, quantity);
 
   return {
-    id: `futures-order-${id}`,
+    id: stableId,
     orderId: id,
     market: "futures",
     pair: symbol,
