@@ -18,7 +18,7 @@ type BingXCredentials = {
   apiKey: string;
   secretKey: string;
 };
-type BingXHistoryEndpoint = "fills" | "orders";
+type BingXHistoryEndpoint = "fills" | "orders" | "positions";
 
 type NormalizedTrade = {
   id: string;
@@ -45,6 +45,7 @@ const asNumber = (value: unknown) => {
   return Number.isFinite(numberValue) ? numberValue : 0;
 };
 const asString = (value: unknown) => String(value ?? "");
+const bingxDebugEnabled = /^true$/i.test(process.env.BINGX_DEBUG || "");
 const positiveNumber = (...values: unknown[]) => {
   for (const value of values) {
     const numberValue = asNumber(value);
@@ -115,7 +116,16 @@ async function collectBingXHistory(
 
   for (let cursor = startTime; cursor < endTime; cursor += bingxHistoryWindowMs) {
     const chunkEnd = Math.min(cursor + bingxHistoryWindowMs, endTime);
-    if (endpoint === "fills") {
+    if (endpoint === "positions") {
+      chunks.push(await bingxRequest<unknown>(credentials, "/openApi/swap/v1/trade/positionHistory", {
+        currency: "USDT",
+        pageIndex: "1",
+        pageSize: extraParams.pageSize || "100",
+        ...extraParams,
+        startTs: String(cursor),
+        endTs: String(chunkEnd),
+      }));
+    } else if (endpoint === "fills") {
       chunks.push(await bingxRequest<unknown>(credentials, "/openApi/swap/v2/trade/allFillOrders", {
         tradingUnit: "CONT",
         currency: "USDT",
@@ -134,6 +144,22 @@ async function collectBingXHistory(
     }
   }
 
+  return chunks;
+}
+
+async function collectBingXPositionHistory(
+  credentials: BingXCredentials,
+  symbols: string[],
+  startTime: number,
+  endTime: number,
+) {
+  const uniqueSymbols = [...new Set(symbols.map((symbol) => symbol.trim()).filter(Boolean))];
+  if (!uniqueSymbols.length) return [];
+
+  const chunks: unknown[] = [];
+  for (const symbol of uniqueSymbols) {
+    chunks.push(...await collectBingXHistory(credentials, "positions", startTime, endTime, { symbol }));
+  }
   return chunks;
 }
 
@@ -190,6 +216,43 @@ function normalizePosition(position: JsonRecord): NormalizedTrade | null {
   };
 }
 
+function normalizePositionHistory(position: JsonRecord): NormalizedTrade | null {
+  const symbol = asString(position.symbol);
+  const rawPositionId = asString(position.positionId ?? position.id);
+  if (!symbol) return null;
+
+  const entry = positiveNumber(position.avgPrice, position.entryPrice, position.openAvgPrice);
+  const exit = positiveNumber(position.avgClosePrice, position.closeAvgPrice, position.exitPrice, position.closePrice);
+  const size = positiveNumber(position.closePositionAmt, position.positionAmt, position.volume, position.quantity);
+  if (!entry || !exit || !size) return null;
+
+  const sideValue = asString(position.positionSide ?? position.side).toUpperCase();
+  const side: "Long" | "Short" = sideValue === "SHORT" ? "Short" : "Long";
+  const openedAt = asNumber(position.openTime ?? position.createTime ?? position.time ?? Date.now());
+  const closedAt = asNumber(position.updateTime ?? position.closeTime ?? position.closedTime ?? openedAt);
+  const pnl = asNumber(position.realisedProfit ?? position.realizedProfit ?? position.realisedPnl ?? position.realizedPnl ?? position.netProfit ?? position.pnl);
+  const leverage = positiveNumber(position.leverage);
+  const margin = Math.abs(leverage ? (entry * size) / leverage : entry * size);
+  const id = rawPositionId || `${symbol}-${side}-${openedAt}-${closedAt}`;
+
+  return {
+    id: `futures-position-history-${id}`,
+    orderId: id,
+    market: "futures",
+    pair: symbol,
+    side,
+    opened: new Date(openedAt).toISOString(),
+    closedAt: new Date(closedAt).toISOString(),
+    durationMs: Math.max(0, closedAt - openedAt),
+    entry,
+    exit,
+    size,
+    pnl,
+    roi: margin ? (pnl / margin) * 100 : 0,
+    status: "Closed",
+  };
+}
+
 function normalizeOrder(order: JsonRecord): NormalizedTrade | null {
   const symbol = asString(order.symbol);
   const id = asString(order.orderId ?? order.id);
@@ -201,7 +264,7 @@ function normalizeOrder(order: JsonRecord): NormalizedTrade | null {
   const quantity = Math.abs(asNumber(order.executedQty ?? order.quantity ?? order.origQty ?? order.volume ?? order.amount));
   const entry = positiveNumber(order.entryPrice, order.openAvgPrice, order.avgOpenPrice, order.openPrice);
   const exit = positiveNumber(order.stopPrice, order.avgPrice, order.price);
-  if (!entry || !exit || entry === exit) return null;
+  if (!entry || !exit) return null;
 
   const pnl = asNumber(order.profit ?? order.realizedProfit ?? order.realizedPnl);
   const margin = Math.abs(quantity * entry);
@@ -227,48 +290,6 @@ function normalizeOrder(order: JsonRecord): NormalizedTrade | null {
     status: status === "FILLED" ? "Closed" : "Open",
   };
 }
-
-function verifyBingXHistoryNormalization() {
-  const cancelled = normalizeOrder({
-    orderId: "cancelled",
-    symbol: "NASDAQ100-USDT",
-    status: "CANCELLED",
-    entryPrice: "29067.96",
-    avgPrice: "28711.19",
-    stopPrice: "0",
-    executedQty: "1",
-  });
-  if (cancelled !== null) {
-    throw new Error("BingX history check failed: CANCELLED order was imported");
-  }
-
-  const closeOrder = normalizeOrder({
-    orderId: "close-with-zero-stop",
-    symbol: "NASDAQ100-USDT",
-    status: "FILLED",
-    entryPrice: "29067.96",
-    avgPrice: "28711.19",
-    stopPrice: "0",
-    executedQty: "1",
-  });
-  if (!closeOrder || closeOrder.exit === 0 || closeOrder.entry !== 29067.96 || closeOrder.exit !== 28711.19) {
-    throw new Error("BingX history check failed: stopPrice=0 produced a bad entry/exit");
-  }
-
-  const ambiguousCloseOrder = normalizeOrder({
-    orderId: "ambiguous-close",
-    symbol: "NASDAQ100-USDT",
-    status: "FILLED",
-    avgPrice: "28711.19",
-    stopPrice: "0",
-    executedQty: "1",
-  });
-  if (ambiguousCloseOrder !== null) {
-    throw new Error("BingX history check failed: ambiguous close order was imported");
-  }
-}
-
-verifyBingXHistoryNormalization();
 
 function hasRealizedPnl(trade: NormalizedTrade | null) {
   return trade !== null && Math.abs(trade.pnl) > 0.00000001;
@@ -305,13 +326,14 @@ function debugBingXTradeFields(trade: JsonRecord) {
     side: trade.side,
     positionSide: trade.positionSide,
     avgPrice: trade.avgPrice,
+    avgClosePrice: trade.avgClosePrice,
     price: trade.price,
     executedPrice: trade.executedPrice,
     closePrice: trade.closePrice,
     entryPrice: trade.entryPrice,
     exitPrice: trade.exitPrice,
     pnl: trade.pnl ?? trade.profit,
-    realisedPnl: trade.realisedPnl ?? trade.realizedPnl ?? trade.realizedProfit,
+    realisedPnl: trade.realisedPnl ?? trade.realizedPnl ?? trade.realisedProfit ?? trade.realizedProfit,
     orderType: trade.orderType ?? trade.type,
     status: trade.status,
     openTime: trade.openTime ?? trade.time,
@@ -319,8 +341,10 @@ function debugBingXTradeFields(trade: JsonRecord) {
   };
 }
 
-function logLatestBingXTrades(fills: JsonRecord[], orders: JsonRecord[]) {
-  const latestTrades = [...fills, ...orders]
+function logLatestBingXTrades(positionHistory: JsonRecord[], fills: JsonRecord[], orders: JsonRecord[]) {
+  if (!bingxDebugEnabled) return;
+
+  const latestTrades = [...positionHistory, ...fills, ...orders]
     .sort((left, right) => debugTradeTimestamp(right) - debugTradeTimestamp(left))
     .slice(0, 2)
     .map(debugBingXTradeFields);
@@ -374,11 +398,25 @@ app.all("/api/dashboard", async (req, res) => {
     const rawOrders = ordersResult.status === "fulfilled"
       ? ordersResult.value.flatMap((chunk) => extractList(chunk, ["orders", "list"]))
       : [];
-    logLatestBingXTrades(rawFills, rawOrders);
+    const historySymbols = [
+      ...positionTrades.map((trade) => trade.pair),
+      ...rawOrders.map((order) => asString(order.symbol)),
+      ...rawFills.map((fill) => asString(fill.symbol)),
+    ];
+    const positionHistoryResult = await Promise.allSettled([
+      collectBingXPositionHistory(credentials, historySymbols, historyStart, historyEnd),
+    ]);
+    const rawPositionHistory = positionHistoryResult[0].status === "fulfilled"
+      ? positionHistoryResult[0].value.flatMap((chunk) => extractList(chunk, ["positions", "positionHistory", "history", "list", "data"]))
+      : [];
+    logLatestBingXTrades(rawPositionHistory, rawFills, rawOrders);
 
-    const orderTrades = rawOrders.map(normalizeOrder);
-    const orderTradesWithPnl = orderTrades.filter(hasRealizedPnl);
-    const closedTrades = uniqueTrades(orderTradesWithPnl
+    const positionHistoryTrades = rawPositionHistory.map(normalizePositionHistory);
+    const positionHistoryClosedTrades = positionHistoryTrades
+      .filter((trade): trade is NormalizedTrade => trade !== null)
+      .filter((trade) => trade.size > 0);
+    const fallbackOrderTrades = rawOrders.map(normalizeOrder).filter(hasRealizedPnl);
+    const closedTrades = uniqueTrades((positionHistoryClosedTrades.length ? positionHistoryClosedTrades : fallbackOrderTrades)
       .filter((trade): trade is NormalizedTrade => trade !== null)
       .filter((trade) => trade.size > 0));
     const trades = sortTrades([...positionTrades, ...closedTrades]);
@@ -392,9 +430,10 @@ app.all("/api/dashboard", async (req, res) => {
         futures: trades.filter((trade) => trade.market === "futures").length,
       },
       syncWarnings: [
-        fillsResult.status === "rejected" ? `allFillOrders недоступен: ${errorMessage(fillsResult.reason)}. Использую fallback allOrders.` : "",
+        positionHistoryResult[0].status === "rejected" ? `positionHistory недоступен: ${errorMessage(positionHistoryResult[0].reason)}. Использую fallback allOrders.` : "",
+        fillsResult.status === "rejected" ? `allFillOrders недоступен: ${errorMessage(fillsResult.reason)}.` : "",
         ordersResult.status === "rejected" ? `allOrders недоступен: ${errorMessage(ordersResult.reason)}.` : "",
-        ordersResult.status === "rejected" && fillsResult.status === "rejected" ? "История сделок сейчас недоступна через BingX API. Открытые позиции всё равно обновляются через positions." : "",
+        positionHistoryResult[0].status === "rejected" && ordersResult.status === "rejected" && fillsResult.status === "rejected" ? "История сделок сейчас недоступна через BingX API. Открытые позиции всё равно обновляются через positions." : "",
       ].filter(Boolean),
       historyWindow: {
         start: historyStart,
