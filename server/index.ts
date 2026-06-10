@@ -119,7 +119,7 @@ async function collectBingXHistory(
     if (endpoint === "positions") {
       chunks.push(await bingxRequest<unknown>(credentials, "/openApi/swap/v1/trade/positionHistory", {
         currency: "USDT",
-        pageIndex: "1",
+        pageIndex: "0",
         pageSize: extraParams.pageSize || "100",
         ...extraParams,
         startTs: String(cursor),
