@@ -45,6 +45,13 @@ const asNumber = (value: unknown) => {
   return Number.isFinite(numberValue) ? numberValue : 0;
 };
 const asString = (value: unknown) => String(value ?? "");
+const positiveNumber = (...values: unknown[]) => {
+  for (const value of values) {
+    const numberValue = asNumber(value);
+    if (numberValue > 0) return numberValue;
+  }
+  return 0;
+};
 
 async function verifyFirebaseToken(idToken?: string) {
   const apiKey = process.env.FIREBASE_WEB_API_KEY;
@@ -183,46 +190,19 @@ function normalizePosition(position: JsonRecord): NormalizedTrade | null {
   };
 }
 
-function normalizeFill(fill: JsonRecord): NormalizedTrade | null {
-  const symbol = asString(fill.symbol);
-  const rawOrderId = asString(fill.orderId ?? fill.id);
-  const id = asString(fill.tradeId ?? fill.fillId ?? fill.orderId ?? fill.id);
-  if (!symbol || !id) return null;
-
-  const quantity = Math.abs(asNumber(fill.quantity ?? fill.qty ?? fill.executedQty ?? fill.fillQty ?? fill.volume ?? fill.amount));
-  const entry = asNumber(fill.price ?? fill.avgPrice ?? fill.fillPrice);
-  const pnl = asNumber(fill.realizedPnl ?? fill.realizedProfit ?? fill.profit);
-  const quoteAmount = Math.abs(asNumber(fill.quoteQty ?? fill.quoteVolume ?? fill.quoteAmount ?? quantity * entry));
-  const sideValue = asString(fill.positionSide ?? fill.side).toUpperCase();
-  const side: "Long" | "Short" = sideValue === "SHORT" || sideValue === "SELL" ? "Short" : "Long";
-  const timestamp = asNumber(fill.time ?? fill.tradeTime ?? fill.fillTime ?? fill.timestamp ?? fill.updateTime ?? Date.now());
-
-  return {
-    id: `futures-fill-${id}`,
-    orderId: rawOrderId || id,
-    market: "futures",
-    pair: symbol,
-    side,
-    opened: new Date(timestamp).toISOString(),
-    closedAt: new Date(timestamp).toISOString(),
-    durationMs: 0,
-    entry,
-    exit: entry,
-    size: quantity,
-    pnl,
-    roi: quoteAmount ? (pnl / quoteAmount) * 100 : 0,
-    status: "Closed",
-  };
-}
-
 function normalizeOrder(order: JsonRecord): NormalizedTrade | null {
   const symbol = asString(order.symbol);
   const id = asString(order.orderId ?? order.id);
   if (!symbol || !id) return null;
 
   const status = asString(order.status).toUpperCase();
+  if (["CANCELLED", "CANCELED", "NEW", "PENDING"].includes(status)) return null;
+
   const quantity = Math.abs(asNumber(order.executedQty ?? order.quantity ?? order.origQty ?? order.volume ?? order.amount));
-  const entry = asNumber(order.avgPrice ?? order.price);
+  const entry = positiveNumber(order.entryPrice, order.openAvgPrice, order.avgOpenPrice, order.openPrice);
+  const exit = positiveNumber(order.stopPrice, order.avgPrice, order.price);
+  if (!entry || !exit || entry === exit) return null;
+
   const pnl = asNumber(order.profit ?? order.realizedProfit ?? order.realizedPnl);
   const margin = Math.abs(quantity * entry);
   const sideValue = asString(order.positionSide ?? order.side).toUpperCase();
@@ -240,13 +220,55 @@ function normalizeOrder(order: JsonRecord): NormalizedTrade | null {
     closedAt: new Date(closeTimestamp).toISOString(),
     durationMs: Math.max(0, closeTimestamp - timestamp),
     entry,
-    exit: asNumber(order.stopPrice ?? order.avgPrice ?? order.price),
+    exit,
     size: quantity,
     pnl,
     roi: margin ? (pnl / margin) * 100 : 0,
     status: status === "FILLED" ? "Closed" : "Open",
   };
 }
+
+function verifyBingXHistoryNormalization() {
+  const cancelled = normalizeOrder({
+    orderId: "cancelled",
+    symbol: "NASDAQ100-USDT",
+    status: "CANCELLED",
+    entryPrice: "29067.96",
+    avgPrice: "28711.19",
+    stopPrice: "0",
+    executedQty: "1",
+  });
+  if (cancelled !== null) {
+    throw new Error("BingX history check failed: CANCELLED order was imported");
+  }
+
+  const closeOrder = normalizeOrder({
+    orderId: "close-with-zero-stop",
+    symbol: "NASDAQ100-USDT",
+    status: "FILLED",
+    entryPrice: "29067.96",
+    avgPrice: "28711.19",
+    stopPrice: "0",
+    executedQty: "1",
+  });
+  if (!closeOrder || closeOrder.exit === 0 || closeOrder.entry !== 29067.96 || closeOrder.exit !== 28711.19) {
+    throw new Error("BingX history check failed: stopPrice=0 produced a bad entry/exit");
+  }
+
+  const ambiguousCloseOrder = normalizeOrder({
+    orderId: "ambiguous-close",
+    symbol: "NASDAQ100-USDT",
+    status: "FILLED",
+    avgPrice: "28711.19",
+    stopPrice: "0",
+    executedQty: "1",
+  });
+  if (ambiguousCloseOrder !== null) {
+    throw new Error("BingX history check failed: ambiguous close order was imported");
+  }
+}
+
+verifyBingXHistoryNormalization();
 
 function hasRealizedPnl(trade: NormalizedTrade | null) {
   return trade !== null && Math.abs(trade.pnl) > 0.00000001;
@@ -265,20 +287,45 @@ function uniqueTrades(trades: NormalizedTrade[]) {
   });
 }
 
-function mergeDurationFromOrders(fillTrades: NormalizedTrade[], orderTrades: NormalizedTrade[]) {
-  const orderById = new Map(orderTrades.map((trade) => [trade.orderId, trade]));
-  return fillTrades.map((trade) => {
-    const order = orderById.get(trade.orderId);
-    if (!order) return trade;
-    return {
-      ...trade,
-      opened: order.opened,
-      closedAt: order.closedAt,
-      durationMs: order.durationMs,
-      entry: trade.entry || order.entry,
-      exit: trade.exit || order.exit,
-    };
-  });
+function debugTradeTimestamp(trade: JsonRecord) {
+  return asNumber(
+    trade.closeTime ??
+    trade.updateTime ??
+    trade.tradeTime ??
+    trade.fillTime ??
+    trade.openTime ??
+    trade.time ??
+    trade.timestamp,
+  );
+}
+
+function debugBingXTradeFields(trade: JsonRecord) {
+  return {
+    symbol: trade.symbol,
+    side: trade.side,
+    positionSide: trade.positionSide,
+    avgPrice: trade.avgPrice,
+    price: trade.price,
+    executedPrice: trade.executedPrice,
+    closePrice: trade.closePrice,
+    entryPrice: trade.entryPrice,
+    exitPrice: trade.exitPrice,
+    pnl: trade.pnl ?? trade.profit,
+    realisedPnl: trade.realisedPnl ?? trade.realizedPnl ?? trade.realizedProfit,
+    orderType: trade.orderType ?? trade.type,
+    status: trade.status,
+    openTime: trade.openTime ?? trade.time,
+    closeTime: trade.closeTime ?? trade.updateTime,
+  };
+}
+
+function logLatestBingXTrades(fills: JsonRecord[], orders: JsonRecord[]) {
+  const latestTrades = [...fills, ...orders]
+    .sort((left, right) => debugTradeTimestamp(right) - debugTradeTimestamp(left))
+    .slice(0, 2)
+    .map(debugBingXTradeFields);
+
+  console.log("[BingX debug] latest trades", latestTrades);
 }
 
 const errorMessage = (value: unknown) =>
@@ -321,26 +368,17 @@ app.all("/api/dashboard", async (req, res) => {
       .map(normalizePosition)
       .filter((trade): trade is NormalizedTrade => trade !== null);
 
-    const fillTrades = fillsResult.status === "fulfilled"
-      ? fillsResult.value.flatMap((chunk) =>
-        extractList(chunk, ["fillOrders", "fill_orders", "fills", "orders", "list"]).map(normalizeFill))
+    const rawFills = fillsResult.status === "fulfilled"
+      ? fillsResult.value.flatMap((chunk) => extractList(chunk, ["fillOrders", "fill_orders", "fills", "orders", "list"]))
       : [];
-    const orderTrades = ordersResult.status === "fulfilled"
-      ? ordersResult.value.flatMap((chunk) =>
-        extractList(chunk, ["orders", "list"]).map(normalizeOrder))
+    const rawOrders = ordersResult.status === "fulfilled"
+      ? ordersResult.value.flatMap((chunk) => extractList(chunk, ["orders", "list"]))
       : [];
-    const mergedFillTrades = mergeDurationFromOrders(
-      fillTrades.filter((trade): trade is NormalizedTrade => trade !== null),
-      orderTrades.filter((trade): trade is NormalizedTrade => trade !== null),
-    );
-    const fillTradesWithPnl = mergedFillTrades.filter(hasRealizedPnl);
-    const fillOrderIds = new Set(fillTradesWithPnl.map((trade) => trade.orderId));
+    logLatestBingXTrades(rawFills, rawOrders);
+
+    const orderTrades = rawOrders.map(normalizeOrder);
     const orderTradesWithPnl = orderTrades.filter(hasRealizedPnl);
-    const sourceTrades = [
-      ...fillTradesWithPnl,
-      ...orderTradesWithPnl.filter((trade) => trade !== null && !fillOrderIds.has(trade.orderId)),
-    ];
-    const closedTrades = uniqueTrades(sourceTrades
+    const closedTrades = uniqueTrades(orderTradesWithPnl
       .filter((trade): trade is NormalizedTrade => trade !== null)
       .filter((trade) => trade.size > 0));
     const trades = sortTrades([...positionTrades, ...closedTrades]);
