@@ -71,6 +71,10 @@ type DashboardResponse = {
   unrealizedPnl: number;
   trades: Array<Omit<Trade, "side" | "status"> & { side: string; status: string }>;
   marketCounts?: { futures: number };
+  positionHistoryClosedCount?: number;
+  positionHistoryUniqueClosedCount?: number;
+  positionHistoryDuplicateFingerprintCount?: number;
+  positionHistoryCleanupSafe?: boolean;
   syncWarnings?: string[];
   historyWindow?: { start: number; end: number };
 };
@@ -432,6 +436,10 @@ function App() {
     const existingTrades = await getDocs(tradesRef);
     const existingTradeData = new Map(existingTrades.docs.map((document) => [document.id, document.data() as Partial<CachedTrade>]));
     const incomingTradeIds = new Set(normalizedTrades.map((trade) => trade.id));
+    const canCleanupLegacyBingXHistory =
+      data.positionHistoryCleanupSafe === true &&
+      Number(data.positionHistoryClosedCount || 0) > 0 &&
+      Number(data.positionHistoryUniqueClosedCount || 0) > 0;
     if (deleteMissingOpen) {
       existingTrades.forEach((document) => {
         const data = document.data() as Partial<CachedTrade>;
@@ -447,9 +455,14 @@ function App() {
         data.source === "bingx" &&
         data.market === "futures" &&
         data.status === "Closed" &&
-        (id.startsWith("futures-fill-") || id.startsWith("futures-order-") || Number(data.exit || 0) === 0);
+        (
+          id.startsWith("futures-fill-") ||
+          id.startsWith("futures-order-") ||
+          id.startsWith("futures-position-history-") ||
+          Number(data.exit || 0) === 0
+        );
 
-      if (staleBingXHistoryTrade) {
+      if (canCleanupLegacyBingXHistory && staleBingXHistoryTrade) {
         batch.delete(document.ref);
       }
     });

@@ -330,6 +330,45 @@ function uniqueTrades(trades: NormalizedTrade[]) {
   });
 }
 
+function tradeFingerprint(trade: NormalizedTrade) {
+  return [
+    trade.pair,
+    trade.side,
+    trade.opened,
+    trade.closedAt,
+    trade.entry.toFixed(8),
+    trade.exit.toFixed(8),
+    trade.pnl.toFixed(8),
+    trade.size.toFixed(8),
+  ].join("|");
+}
+
+function uniqueClosedTrades(trades: NormalizedTrade[]) {
+  const seenIds = new Set<string>();
+  const seenFingerprints = new Set<string>();
+  return trades.filter((trade) => {
+    const fingerprint = tradeFingerprint(trade);
+    if (seenIds.has(trade.id) || seenFingerprints.has(fingerprint)) return false;
+    seenIds.add(trade.id);
+    seenFingerprints.add(fingerprint);
+    return true;
+  });
+}
+
+function duplicateTradeFingerprints(trades: NormalizedTrade[]) {
+  const byFingerprint = new Map<string, NormalizedTrade[]>();
+  trades.forEach((trade) => {
+    const fingerprint = tradeFingerprint(trade);
+    byFingerprint.set(fingerprint, [...(byFingerprint.get(fingerprint) || []), trade]);
+  });
+  return [...byFingerprint.entries()]
+    .filter(([, group]) => group.length > 1)
+    .map(([fingerprint, group]) => ({
+      fingerprint,
+      ids: group.map((trade) => trade.id),
+    }));
+}
+
 function debugTradeTimestamp(trade: JsonRecord) {
   return asNumber(
     trade.closeTime ??
@@ -437,10 +476,23 @@ app.all("/api/dashboard", async (req, res) => {
     const positionHistoryClosedTrades = positionHistoryTrades
       .filter((trade): trade is NormalizedTrade => trade !== null)
       .filter((trade) => trade.size > 0);
-    const fallbackOrderTrades = rawOrders.map(normalizeOrder).filter(hasRealizedPnl);
-    const closedTrades = uniqueTrades((positionHistoryClosedTrades.length ? positionHistoryClosedTrades : fallbackOrderTrades)
+    const dedupedPositionHistoryClosedTrades = uniqueClosedTrades(positionHistoryClosedTrades);
+    const positionHistoryDuplicateFingerprints = duplicateTradeFingerprints(positionHistoryClosedTrades);
+    const fallbackOrderTrades = uniqueClosedTrades(rawOrders.map(normalizeOrder).filter(hasRealizedPnl)
       .filter((trade): trade is NormalizedTrade => trade !== null)
       .filter((trade) => trade.size > 0));
+    const closedTrades = positionHistoryClosedTrades.length ? dedupedPositionHistoryClosedTrades : fallbackOrderTrades;
+    const positionHistoryCleanupSafe = dedupedPositionHistoryClosedTrades.length > 0;
+    if (bingxDebugEnabled) {
+      console.log("[BingX debug] closed trade dedup", {
+        rawPositionHistoryLength: rawPositionHistory.length,
+        positionHistoryTradesLength: positionHistoryTrades.length,
+        positionHistoryClosedTradesLength: positionHistoryClosedTrades.length,
+        closedTradesLength: closedTrades.length,
+        closedTradeIds: closedTrades.map((trade) => trade.id),
+        duplicateFingerprints: positionHistoryDuplicateFingerprints,
+      });
+    }
     const trades = sortTrades([...positionTrades, ...closedTrades]);
 
     res.json({
@@ -451,6 +503,10 @@ app.all("/api/dashboard", async (req, res) => {
       marketCounts: {
         futures: trades.filter((trade) => trade.market === "futures").length,
       },
+      positionHistoryClosedCount: positionHistoryClosedTrades.length,
+      positionHistoryUniqueClosedCount: dedupedPositionHistoryClosedTrades.length,
+      positionHistoryDuplicateFingerprintCount: positionHistoryDuplicateFingerprints.length,
+      positionHistoryCleanupSafe,
       syncWarnings: [
         positionHistoryResult[0].status === "rejected" ? `positionHistory недоступен: ${errorMessage(positionHistoryResult[0].reason)}. Использую fallback allOrders.` : "",
         fillsResult.status === "rejected" ? `allFillOrders недоступен: ${errorMessage(fillsResult.reason)}.` : "",
