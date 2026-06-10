@@ -449,7 +449,7 @@ function App() {
         data.status === "Closed" &&
         (id.startsWith("futures-fill-") || id.startsWith("futures-order-") || Number(data.exit || 0) === 0);
 
-      if (staleBingXHistoryTrade && !incomingTradeIds.has(document.id)) {
+      if (staleBingXHistoryTrade) {
         batch.delete(document.ref);
       }
     });
