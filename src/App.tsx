@@ -440,6 +440,19 @@ function App() {
         }
       });
     }
+    existingTrades.forEach((document) => {
+      const data = document.data() as Partial<CachedTrade>;
+      const id = String(data.id || document.id);
+      const staleBingXHistoryTrade =
+        data.source === "bingx" &&
+        data.market === "futures" &&
+        data.status === "Closed" &&
+        (id.startsWith("futures-fill-") || id.startsWith("futures-order-") || Number(data.exit || 0) === 0);
+
+      if (staleBingXHistoryTrade) {
+        batch.delete(document.ref);
+      }
+    });
     normalizedTrades.forEach((trade) => {
       const ref = doc(db, "users", user.uid, "trades", trade.id);
       const manualFields = existingTradeData.get(trade.id);
