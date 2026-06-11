@@ -242,8 +242,23 @@ function normalizePositionHistory(position: JsonRecord): NormalizedTrade | null 
   const rawPositionId = asString(position.positionId ?? position.id);
   if (!symbol) return null;
 
+  // Closed BingX futures trades must come from positionHistory: avgPrice is the
+  // position entry, avgClosePrice/closeAvgPrice is the real close execution.
   const entry = positiveNumber(position.avgPrice, position.entryPrice, position.openAvgPrice);
-  const exit = positiveNumber(position.avgClosePrice, position.closeAvgPrice, position.exitPrice, position.closePrice);
+  const positionHistoryExit = positiveNumber(position.avgClosePrice, position.closeAvgPrice);
+  const fallbackExit = positiveNumber(position.exitPrice, position.closePrice);
+  if (!positionHistoryExit) {
+    console.warn("[BingX warning] positionHistory entry is missing avgClosePrice", {
+      symbol,
+      positionId: rawPositionId,
+      avgPrice: position.avgPrice,
+      avgClosePrice: position.avgClosePrice,
+      closeAvgPrice: position.closeAvgPrice,
+      exitPrice: position.exitPrice,
+      closePrice: position.closePrice,
+    });
+  }
+  const exit = positionHistoryExit ?? fallbackExit;
   const size = positiveNumber(position.closePositionAmt, position.positionAmt, position.volume, position.quantity);
   if (!entry || !exit || !size) return null;
 
@@ -344,6 +359,8 @@ function tradeFingerprint(trade: NormalizedTrade) {
 }
 
 function uniqueClosedTrades(trades: NormalizedTrade[]) {
+  // BingX can return the same closed position more than once, sometimes with
+  // different ids. Keep one row by id first, then by economic fingerprint.
   const seenIds = new Set<string>();
   const seenFingerprints = new Set<string>();
   return trades.filter((trade) => {
@@ -478,6 +495,18 @@ app.all("/api/dashboard", async (req, res) => {
       .filter((trade) => trade.size > 0);
     const dedupedPositionHistoryClosedTrades = uniqueClosedTrades(positionHistoryClosedTrades);
     const positionHistoryDuplicateFingerprints = duplicateTradeFingerprints(positionHistoryClosedTrades);
+    if (
+      positionHistoryClosedTrades.length > dedupedPositionHistoryClosedTrades.length ||
+      positionHistoryDuplicateFingerprints.length > 0
+    ) {
+      console.warn("[BingX warning] duplicate positionHistory closed trades detected", {
+        positionHistoryClosedCount: positionHistoryClosedTrades.length,
+        positionHistoryUniqueClosedCount: dedupedPositionHistoryClosedTrades.length,
+        positionHistoryDuplicateFingerprintCount: positionHistoryDuplicateFingerprints.length,
+        closedTradeIds: dedupedPositionHistoryClosedTrades.map((trade) => trade.id),
+        duplicateFingerprints: positionHistoryDuplicateFingerprints,
+      });
+    }
     const fallbackOrderTrades = uniqueClosedTrades(rawOrders.map(normalizeOrder).filter(hasRealizedPnl)
       .filter((trade): trade is NormalizedTrade => trade !== null)
       .filter((trade) => trade.size > 0));
