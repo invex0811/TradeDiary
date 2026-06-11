@@ -470,6 +470,9 @@ function App() {
         }
       });
     }
+    // One-time BingX futures cleanup: positionHistory now writes stable
+    // futures-closed-* ids, so remove legacy order/fill rows only after the
+    // server confirms it normalized at least one valid closed position.
     existingTrades.forEach((document) => {
       const data = document.data() as Partial<CachedTrade>;
       const existingTrade = normalizeTrade({ id: document.id, ...data });
