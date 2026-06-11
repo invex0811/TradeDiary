@@ -317,6 +317,23 @@ const normalizeTrade = (trade: RawTradeInput): Trade => {
     screenshotUrls: normalizeTradingViewUrls(trade.screenshotUrls, typeof trade.screenshotUrl === "string" ? trade.screenshotUrl : ""),
   };
 };
+const normalizeTradeKeyPart = (value: unknown) => String(value ?? "").trim();
+const extractClosedPositionId = (trade: Pick<Trade, "id" | "orderId">) => {
+  if (trade.id.startsWith("futures-closed-")) {
+    return trade.id.replace(/^futures-closed-/, "");
+  }
+  return normalizeTradeKeyPart(trade.orderId);
+};
+const tradeFingerprint = (trade: Pick<Trade, "pair" | "side" | "openedAt" | "closedAt" | "entry" | "exit" | "pnl" | "size">) => [
+  trade.pair,
+  trade.side,
+  trade.openedAt,
+  trade.closedAt,
+  trade.entry.toFixed(8),
+  trade.exit.toFixed(8),
+  trade.pnl.toFixed(8),
+  trade.size.toFixed(8),
+].join("|");
 const tradeFromFirestore = (data: DocumentData): Trade => normalizeTrade(data as CachedTrade);
 const splitSymbol = (pair: string) => {
   const normalized = pair.toUpperCase().replace(/[^A-Z0-9]/g, "");
@@ -436,6 +453,11 @@ function App() {
     const existingTrades = await getDocs(tradesRef);
     const existingTradeData = new Map(existingTrades.docs.map((document) => [document.id, document.data() as Partial<CachedTrade>]));
     const incomingTradeIds = new Set(normalizedTrades.map((trade) => trade.id));
+    const incomingClosedBingXTrades = normalizedTrades.filter((trade) => trade.market === "futures" && trade.status === "Closed");
+    const incomingClosedPositionIds = new Set(incomingClosedBingXTrades
+      .map(extractClosedPositionId)
+      .filter(Boolean));
+    const incomingClosedFingerprints = new Set(incomingClosedBingXTrades.map(tradeFingerprint));
     const canCleanupLegacyBingXHistory =
       data.positionHistoryCleanupSafe === true &&
       Number(data.positionHistoryClosedCount || 0) > 0 &&
@@ -450,16 +472,32 @@ function App() {
     }
     existingTrades.forEach((document) => {
       const data = document.data() as Partial<CachedTrade>;
+      const existingTrade = normalizeTrade({ id: document.id, ...data });
       const id = String(data.id || document.id);
+      const orderId = normalizeTradeKeyPart(data.orderId);
+      const existingPositionId = id.startsWith("futures-closed-")
+        ? id.replace(/^futures-closed-/, "")
+        : orderId;
+      const isNewClosedTrade = id.startsWith("futures-closed-");
+      const matchesIncomingPosition =
+        Boolean(existingPositionId) &&
+        incomingClosedPositionIds.has(existingPositionId) &&
+        !incomingTradeIds.has(document.id);
+      const matchesIncomingFingerprint =
+        incomingClosedFingerprints.has(tradeFingerprint(existingTrade)) &&
+        !incomingTradeIds.has(document.id);
       const staleBingXHistoryTrade =
         data.source === "bingx" &&
         data.market === "futures" &&
         data.status === "Closed" &&
+        !isNewClosedTrade &&
         (
           id.startsWith("futures-fill-") ||
           id.startsWith("futures-order-") ||
           id.startsWith("futures-position-history-") ||
-          Number(data.exit || 0) === 0
+          Number(data.exit || 0) === 0 ||
+          matchesIncomingPosition ||
+          matchesIncomingFingerprint
         );
 
       if (canCleanupLegacyBingXHistory && staleBingXHistoryTrade) {
